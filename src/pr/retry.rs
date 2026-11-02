@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{TimeDelta, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::api::pulls::{self, CheckRun, StatusContext};
 use crate::api::{Client, PrRef, Repo, is_failed, parse_pr_ref};
@@ -41,7 +41,7 @@ struct RunPlan {
     run_id: u64,
     workflow: String,
     jobs: Vec<FailedJob>,
-    /// "rerun", "dry-run", or the error from the rerun request.
+    /// "rerun", "already rerun", "dry-run", or the error from the rerun request.
     result: String,
 }
 
@@ -217,11 +217,15 @@ fn unsettled_prs(client: &Client, repo: &Repo) -> Result<Vec<PrRef>> {
 /// The question to ask before rerunning across a repo, or None with nothing to rerun.
 fn sweep_question(plans: &[PrPlan]) -> Option<String> {
     let with_runs: Vec<&PrPlan> = plans.iter().filter(|p| !p.runs.is_empty()).collect();
-    let runs = with_runs.iter().map(|p| p.runs.len()).sum();
+    // PRs on one head commit share its runs.
+    let runs: HashSet<u64> = with_runs
+        .iter()
+        .flat_map(|p| p.runs.iter().map(|r| r.run_id))
+        .collect();
     with_runs.first().map(|first| {
         format!(
             "Rerun {} across {} in {}?",
-            output::plural(runs, "workflow run"),
+            output::plural(runs.len(), "workflow run"),
             output::plural(with_runs.len(), "PR"),
             first.repo
         )
@@ -308,8 +312,14 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
         return Ok(());
     }
 
+    // PRs on one head commit share its runs. A refused run stays eligible for the next PR.
+    let mut sent = HashSet::new();
     for (pr, plan) in prs.iter().zip(&mut plans) {
         for run in &mut plan.runs {
+            if !args.dry_run && sent.contains(&run.run_id) {
+                run.result = "already rerun".to_string();
+                continue;
+            }
             run.result = if args.dry_run {
                 "dry-run".to_string()
             } else {
@@ -319,7 +329,10 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
                     run.run_id
                 );
                 match client.post(&path, &json!({})) {
-                    Ok(_) => "rerun".to_string(),
+                    Ok(_) => {
+                        sent.insert(run.run_id);
+                        "rerun".to_string()
+                    }
                     Err(e) => format!("{e:#}"),
                 }
             };
@@ -759,6 +772,40 @@ mod tests {
         rerun.assert();
     }
 
+    /// Two failing PRs on one head commit, so their rollups both report run 10.
+    fn mock_shared_run(server: &mut Server) {
+        mock_open_prs(server, &[(1, Some("FAILURE")), (2, Some("FAILURE"))]);
+        mock_rollup(server, 1, vec![node("Ubuntu", "Build", 10, "FAILURE")]);
+        mock_rollup(server, 2, vec![node("Ubuntu", "Build", 10, "FAILURE")]);
+    }
+
+    #[test]
+    fn a_run_shared_by_two_prs_reruns_once() {
+        let mut server = Server::new();
+        mock_shared_run(&mut server);
+        let rerun = server
+            .mock("POST", "/repos/o/r/actions/runs/10/rerun-failed-jobs")
+            .with_status(201)
+            .expect(1)
+            .create();
+        run(&ctx(&server, false), sweep(false)).unwrap();
+        rerun.assert();
+    }
+
+    #[test]
+    fn a_refused_shared_run_is_tried_again() {
+        let mut server = Server::new();
+        mock_shared_run(&mut server);
+        let rerun = server
+            .mock("POST", "/repos/o/r/actions/runs/10/rerun-failed-jobs")
+            .with_status(403)
+            .with_body(r#"{"message": "Must have admin rights"}"#)
+            .expect(2)
+            .create();
+        run(&ctx(&server, false), sweep(false)).unwrap();
+        rerun.assert();
+    }
+
     #[test]
     fn all_with_nothing_to_retry() {
         let mut server = Server::new();
@@ -795,6 +842,28 @@ mod tests {
         assert_eq!(
             sweep_question(&[plan_of(1, &[10, 11]), plan_of(2, &[]), plan_of(3, &[30])]).unwrap(),
             "Rerun 3 workflow runs across 2 PRs in o/r?"
+        );
+    }
+
+    #[test]
+    fn sweep_question_counts_a_shared_run_once() {
+        let plan_of = |number| PrPlan {
+            repo: "o/r".to_string(),
+            number,
+            title: "Fix".to_string(),
+            runs: vec![RunPlan {
+                run_id: 10,
+                workflow: "Build".to_string(),
+                jobs: Vec::new(),
+                result: String::new(),
+            }],
+            skipped: Vec::new(),
+            pending: 0,
+            actions_status: None,
+        };
+        assert_eq!(
+            sweep_question(&[plan_of(1), plan_of(2)]).unwrap(),
+            "Rerun 1 workflow run across 2 PRs in o/r?"
         );
     }
 
