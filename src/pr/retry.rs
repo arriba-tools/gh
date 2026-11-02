@@ -300,7 +300,9 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
         && let Some(question) = sweep_question(&plans)
         && !prompt::confirm(&question, ctx.yes)?
     {
-        if !ctx.json {
+        if ctx.json {
+            eprintln!("Cancelled");
+        } else {
             println!("Cancelled");
         }
         return Ok(());
