@@ -73,7 +73,7 @@ pub enum PrCommand {
     Dump(DumpArgs),
     /// Summarize a PR's state and checks, failing when a check failed
     Checks(ChecksArgs),
-    /// Rerun failed and cancelled checks on a PR or all your PRs
+    /// Rerun failed and cancelled checks on a PR, your PRs, or every open PR
     Retry(RetryArgs),
     /// Show failed checks with their failed steps and error lines
     Failures(FailuresArgs),
@@ -292,6 +292,10 @@ pub struct RetryArgs {
     /// Retry every open PR you authored in the repo
     #[arg(long)]
     pub mine: bool,
+
+    /// Retry every open PR in the repo, whoever authored it
+    #[arg(long, conflicts_with = "mine")]
+    pub all: bool,
 
     /// Print the run tree without rerunning
     #[arg(long)]
@@ -994,6 +998,20 @@ mod tests {
         assert!(parse_age("7").is_err());
         assert!(parse_age("d").is_err());
         assert!(parse_age("7y").is_err());
+    }
+
+    #[test]
+    fn retry_takes_mine_or_all_but_not_both() {
+        let parse = |flags: &[&str]| {
+            let argv = ["gh-arriba", "pr", "retry"].iter().chain(flags);
+            Cli::try_parse_from(argv).map(|_| ()).map_err(|e| e.kind())
+        };
+        assert!(parse(&["--all"]).is_ok());
+        assert!(parse(&["--mine"]).is_ok());
+        assert_eq!(
+            parse(&["--all", "--mine"]),
+            Err(clap::error::ErrorKind::ArgumentConflict)
+        );
     }
 
     fn notify(args: &[&str]) -> Result<NotifyArgs, clap::error::ErrorKind> {

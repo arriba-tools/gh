@@ -79,7 +79,7 @@ gh arriba [options] <command>
 | `pr apply [PR]` | Apply reviewers' suggestion blocks to the working tree |
 | `pr dump [PR]` | Write the whole discussion as grep-friendly text |
 | `pr checks [PR]...` | Summarize state, mergeability, reviews, and checks, failing when a check failed |
-| `pr retry [PR]` | Rerun failed and cancelled checks on a PR, or all your PRs with `--mine` |
+| `pr retry [PR]` | Rerun failed and cancelled checks on a PR, on all your PRs with `--mine`, or on every open PR with `--all` |
 | `pr failures [PR]` | Show failed checks with their failed steps and error lines, or `--grep` matches, saving full logs |
 | `pr rebase [PR]` | Rebase onto the base branch, signed locally or server-side with `--remote` |
 | `pr reviewers [PR]` | Suggest reviewers from top contributors and request one with `--add` |
@@ -241,6 +241,16 @@ Rerun every failed check across all your open PRs:
 ```
 gh arriba pr retry --mine
 ```
+
+Rerun every failed check on every open PR in a repo, whoever authored it, after confirming the runs
+it found:
+
+```
+gh arriba pr retry owner/repo --all --dry-run
+gh arriba pr retry owner/repo --all
+```
+
+Runs on `main` or from a schedule belong to no PR, so `pr retry` leaves them alone.
 
 Wait for CI after pushing, printing each check as it finishes and failing if any check fails:
 
