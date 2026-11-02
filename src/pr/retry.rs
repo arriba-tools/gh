@@ -8,8 +8,8 @@ use crate::api::pulls::{self, CheckRun, StatusContext};
 use crate::api::{Client, PrRef, Repo, is_failed, parse_pr_ref};
 use crate::cli::RetryArgs;
 use crate::context::{Ctx, git};
-use crate::output;
 use crate::pr::rollup::latest;
+use crate::{output, parallel, prompt};
 
 /// GitHub allows a workflow run to be rerun for this long after its initial run.
 const RERUN_WINDOW_DAYS: i64 = 30;
@@ -159,19 +159,24 @@ enum Target {
     Repo(Option<Repo>),
 }
 
-/// A PR reference, or OWNER/REPO and repo URLs which mean every PR of yours in that repo. A
-/// two-part name that is also a local branch is taken as the branch.
-fn classify(arg: Option<&str>, mine: bool, is_branch: impl Fn(&str) -> bool) -> Result<Target> {
+/// A PR reference, or OWNER/REPO and repo URLs which mean every PR of yours in that repo, or every
+/// PR with `--all`. A two-part name that is also a local branch is taken as the branch. `sweep`
+/// names the flag that asked for a whole repo.
+fn classify(
+    arg: Option<&str>,
+    sweep: Option<&str>,
+    is_branch: impl Fn(&str) -> bool,
+) -> Result<Target> {
     let Some(a) = arg else {
-        return Ok(if mine {
+        return Ok(if sweep.is_some() {
             Target::Repo(None)
         } else {
             Target::Pr(None)
         });
     };
     if parse_pr_ref(a).is_some() || a.trim_start_matches('#').parse::<u64>().is_ok() {
-        if mine {
-            anyhow::bail!("--mine takes a repository, not a PR");
+        if let Some(flag) = sweep {
+            anyhow::bail!("{flag} takes a repository, not a PR");
         }
         return Ok(Target::Pr(Some(a.to_string())));
     }
@@ -180,8 +185,8 @@ fn classify(arg: Option<&str>, mine: bool, is_branch: impl Fn(&str) -> bool) -> 
     if looks_like_repo {
         return Ok(Target::Repo(Some(Repo::parse(a)?)));
     }
-    if mine {
-        anyhow::bail!("--mine takes a repository, not a branch");
+    if let Some(flag) = sweep {
+        anyhow::bail!("{flag} takes a repository, not a branch");
     }
     Ok(Target::Pr(Some(a.to_string())))
 }
@@ -194,6 +199,33 @@ fn local_branch_exists(name: &str) -> bool {
         &format!("refs/heads/{name}"),
     ])
     .is_ok()
+}
+
+/// Open PRs in `repo`, by anyone, that may have something to rerun. A passing rollup has nothing,
+/// nor does a head commit without checks.
+fn unsettled_prs(client: &Client, repo: &Repo) -> Result<Vec<PrRef>> {
+    Ok(pulls::open_prs(client, repo)?
+        .into_iter()
+        .filter(|p| p.checks.as_deref().is_some_and(|c| c != "SUCCESS"))
+        .map(|p| PrRef {
+            repo: repo.clone(),
+            number: p.number,
+        })
+        .collect())
+}
+
+/// The question to ask before rerunning across a repo, or None with nothing to rerun.
+fn sweep_question(plans: &[PrPlan]) -> Option<String> {
+    let with_runs: Vec<&PrPlan> = plans.iter().filter(|p| !p.runs.is_empty()).collect();
+    let runs = with_runs.iter().map(|p| p.runs.len()).sum();
+    with_runs.first().map(|first| {
+        format!(
+            "Rerun {} across {} in {}?",
+            output::plural(runs, "workflow run"),
+            output::plural(with_runs.len(), "PR"),
+            first.repo
+        )
+    })
 }
 
 /// Status of the Actions component on githubstatus.com.
@@ -214,8 +246,21 @@ fn actions_status() -> Result<String> {
 
 pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
     let client = &ctx.client;
-    let prs = match classify(args.target.as_deref(), args.mine, local_branch_exists)? {
+    let sweep = match (args.all, args.mine) {
+        (true, _) => Some("--all"),
+        (_, true) => Some("--mine"),
+        _ => None,
+    };
+    let prs = match classify(args.target.as_deref(), sweep, local_branch_exists)? {
         Target::Pr(arg) => vec![ctx.pr(arg.as_deref())?],
+        Target::Repo(repo) if args.all => {
+            let repo = ctx.repo_or(repo)?;
+            let prs = unsettled_prs(client, &repo)?;
+            if prs.is_empty() && !ctx.json {
+                println!("Nothing to retry on the open PRs in {repo}");
+            }
+            prs
+        }
         Target::Repo(repo) => {
             let repo = ctx.repo_or(repo)?;
             let prs = pulls::my_open_prs(client, &repo)?;
@@ -229,8 +274,9 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
 
     let mut plans = Vec::new();
     let mut status_checked: Option<String> = None;
-    for pr in &prs {
-        let mut plan = plan(pr, fetch_checks(client, pr)?);
+    let fetched = parallel::map(&prs, |pr| fetch_checks(client, pr));
+    for (pr, checks) in prs.iter().zip(fetched) {
+        let mut plan = plan(pr, checks?);
 
         if plan.runs.is_empty() && plan.pending > 0 {
             // Checks stuck pending with nothing failed often means an Actions outage.
@@ -245,7 +291,22 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
         if !ctx.json {
             print_summary(&plan);
         }
+        plans.push(plan);
+    }
 
+    // --all reruns other people's CI, so it asks once against the whole tree.
+    if args.all
+        && !args.dry_run
+        && let Some(question) = sweep_question(&plans)
+        && !prompt::confirm(&question, ctx.yes)?
+    {
+        if !ctx.json {
+            println!("Cancelled");
+        }
+        return Ok(());
+    }
+
+    for (pr, plan) in prs.iter().zip(&mut plans) {
         for run in &mut plan.runs {
             run.result = if args.dry_run {
                 "dry-run".to_string()
@@ -267,7 +328,6 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
                 }
             }
         }
-        plans.push(plan);
     }
 
     if ctx.json {
@@ -360,8 +420,42 @@ mod tests {
         RetryArgs {
             target: Some(target.into()),
             mine,
+            all: false,
             dry_run,
         }
+    }
+
+    /// `--all` on the -R repo of [`ctx`].
+    fn sweep(dry_run: bool) -> RetryArgs {
+        RetryArgs {
+            target: None,
+            mine: false,
+            all: true,
+            dry_run,
+        }
+    }
+
+    fn mock_open_prs(server: &mut Server, rollups: &[(u64, Option<&str>)]) -> Mock {
+        let nodes: Vec<Value> = rollups
+            .iter()
+            .map(|(number, state)| {
+                let rollup = state.map(|s| json!({"state": s}));
+                json!({
+                    "number": number, "state": "OPEN",
+                    "commits": {"nodes": [{"commit": {"statusCheckRollup": rollup}}]}
+                })
+            })
+            .collect();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(r"pullRequests\(states: OPEN".into()))
+            .with_body(
+                json!({"data": {"repository": {"pullRequests": {
+                    "pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes
+                }}}})
+                .to_string(),
+            )
+            .create()
     }
 
     #[test]
@@ -594,6 +688,115 @@ mod tests {
     }
 
     #[test]
+    fn all_reruns_failures_on_every_open_pr() {
+        let mut server = Server::new();
+        // Rollups for 2 and 3 are unmocked, so fetching either fails the run.
+        mock_open_prs(
+            &mut server,
+            &[
+                (1, Some("FAILURE")),
+                (2, Some("SUCCESS")),
+                (3, None),
+                (4, Some("PENDING")),
+            ],
+        );
+        mock_rollup(&mut server, 1, vec![node("Ubuntu", "Build", 10, "FAILURE")]);
+        mock_rollup(&mut server, 4, vec![node("Lint", "Lint", 40, "CANCELLED")]);
+        let build = server
+            .mock("POST", "/repos/o/r/actions/runs/10/rerun-failed-jobs")
+            .with_status(201)
+            .create();
+        let lint = server
+            .mock("POST", "/repos/o/r/actions/runs/40/rerun-failed-jobs")
+            .with_status(201)
+            .create();
+        run(&ctx(&server, false), sweep(false)).unwrap();
+        build.assert();
+        lint.assert();
+    }
+
+    #[test]
+    fn all_dry_run_neither_asks_nor_reruns() {
+        let mut server = Server::new();
+        mock_open_prs(&mut server, &[(1, Some("FAILURE"))]);
+        mock_rollup(&mut server, 1, vec![node("Ubuntu", "Build", 10, "FAILURE")]);
+        let rerun = server
+            .mock("POST", Matcher::Regex("rerun-failed-jobs$".into()))
+            .expect(0)
+            .create();
+        let unconfirmed = Ctx {
+            yes: false,
+            ..ctx(&server, false)
+        };
+        run(&unconfirmed, sweep(true)).unwrap();
+        rerun.assert();
+    }
+
+    #[test]
+    fn all_reruns_nothing_unconfirmed() {
+        // A terminal would block on the prompt.
+        if prompt::interactive() {
+            return;
+        }
+        let mut server = Server::new();
+        mock_open_prs(&mut server, &[(1, Some("FAILURE"))]);
+        mock_rollup(&mut server, 1, vec![node("Ubuntu", "Build", 10, "FAILURE")]);
+        let rerun = server
+            .mock("POST", Matcher::Regex("rerun-failed-jobs$".into()))
+            .expect(0)
+            .create();
+        let unconfirmed = Ctx {
+            yes: false,
+            ..ctx(&server, false)
+        };
+        let err = run(&unconfirmed, sweep(false)).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "Rerun 1 workflow run across 1 PR in o/r? Pass --yes to confirm without a prompt."
+        );
+        rerun.assert();
+    }
+
+    #[test]
+    fn all_with_nothing_to_retry() {
+        let mut server = Server::new();
+        mock_open_prs(&mut server, &[(1, Some("SUCCESS")), (2, None)]);
+        // Nothing is rerun, so nothing needs confirming either.
+        let unconfirmed = Ctx {
+            yes: false,
+            ..ctx(&server, true)
+        };
+        run(&unconfirmed, sweep(false)).unwrap();
+        run(&ctx(&server, false), sweep(false)).unwrap();
+    }
+
+    #[test]
+    fn sweep_question_counts_only_prs_with_runs() {
+        let plan_of = |number, runs: &[u64]| PrPlan {
+            repo: "o/r".to_string(),
+            number,
+            title: "Fix".to_string(),
+            runs: runs
+                .iter()
+                .map(|&run_id| RunPlan {
+                    run_id,
+                    workflow: "Build".to_string(),
+                    jobs: Vec::new(),
+                    result: String::new(),
+                })
+                .collect(),
+            skipped: Vec::new(),
+            pending: 0,
+            actions_status: None,
+        };
+        assert_eq!(sweep_question(&[plan_of(1, &[])]), None);
+        assert_eq!(
+            sweep_question(&[plan_of(1, &[10, 11]), plan_of(2, &[]), plan_of(3, &[30])]).unwrap(),
+            "Rerun 3 workflow runs across 2 PRs in o/r?"
+        );
+    }
+
+    #[test]
     fn plan_skips_runs_past_the_rerun_window() {
         let aged = |name: &str, workflow: &str, run_id: u64, days: i64| {
             let mut run = check(
@@ -646,33 +849,52 @@ mod tests {
     #[test]
     fn classify_targets() {
         let no_branch = |_: &str| false;
-        assert_eq!(classify(None, false, no_branch).unwrap(), Target::Pr(None));
-        assert_eq!(classify(None, true, no_branch).unwrap(), Target::Repo(None));
+        assert_eq!(classify(None, None, no_branch).unwrap(), Target::Pr(None));
         assert_eq!(
-            classify(Some("12"), false, no_branch).unwrap(),
+            classify(None, Some("--mine"), no_branch).unwrap(),
+            Target::Repo(None)
+        );
+        assert_eq!(
+            classify(Some("12"), None, no_branch).unwrap(),
             Target::Pr(Some("12".to_string()))
         );
         assert_eq!(
-            classify(Some("a/b#12"), false, no_branch).unwrap(),
+            classify(Some("a/b#12"), None, no_branch).unwrap(),
             Target::Pr(Some("a/b#12".to_string()))
         );
         assert_eq!(
-            classify(Some("a/b"), false, no_branch).unwrap(),
+            classify(Some("a/b"), None, no_branch).unwrap(),
             Target::Repo(Some(Repo::parse("a/b").unwrap()))
         );
         assert_eq!(
-            classify(Some("https://github.com/a/b"), false, no_branch).unwrap(),
+            classify(Some("https://github.com/a/b"), None, no_branch).unwrap(),
             Target::Repo(Some(Repo::parse("a/b").unwrap()))
         );
         // A two-part name that exists as a local branch is the branch.
         assert_eq!(
-            classify(Some("fix/thing"), false, |_| true).unwrap(),
+            classify(Some("fix/thing"), None, |_| true).unwrap(),
             Target::Pr(Some("fix/thing".to_string()))
         );
         assert_eq!(
-            classify(Some("nathan/dev/feature"), false, no_branch).unwrap(),
+            classify(Some("nathan/dev/feature"), None, no_branch).unwrap(),
             Target::Pr(Some("nathan/dev/feature".to_string()))
         );
-        assert!(classify(Some("12"), true, no_branch).is_err());
+        assert!(classify(Some("12"), Some("--mine"), no_branch).is_err());
+        assert_eq!(
+            classify(Some("a/b"), Some("--all"), no_branch).unwrap(),
+            Target::Repo(Some(Repo::parse("a/b").unwrap()))
+        );
+        assert_eq!(
+            classify(Some("12"), Some("--all"), no_branch)
+                .unwrap_err()
+                .to_string(),
+            "--all takes a repository, not a PR"
+        );
+        assert_eq!(
+            classify(Some("fix/thing"), Some("--all"), |_| true)
+                .unwrap_err()
+                .to_string(),
+            "--all takes a repository, not a branch"
+        );
     }
 }

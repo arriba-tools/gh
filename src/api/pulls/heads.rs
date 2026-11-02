@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
-use super::nullable;
+use super::{Connection, nullable};
 use crate::api::{Client, Repo};
 
 /// A pull request whose head is a given branch name.
@@ -174,6 +174,35 @@ pub fn pr_by_number(client: &Client, repo: &Repo, number: u64) -> Result<Option<
         .with_context(|| format!("Failed to parse PR #{number}"))
 }
 
+/// Every open PR in `repo` by anyone, by number. Listing the repo's PRs avoids the 1000-result cap
+/// of search.
+pub fn open_prs(client: &Client, repo: &Repo) -> Result<Vec<BranchPr>> {
+    let query = format!(
+        "query($owner: String!, $repo: String!, $cursor: String) {{\n  \
+         repository(owner: $owner, name: $repo) {{\n    \
+         pullRequests(states: OPEN, first: 100, after: $cursor) {{\n      \
+         pageInfo {{ hasNextPage endCursor }}\n      nodes {{ {FIELDS} }}\n    }}\n  }}\n}}"
+    );
+    let mut prs = Vec::new();
+    let mut cursor = Value::Null;
+    loop {
+        let data = client.graphql(
+            &query,
+            json!({ "owner": repo.owner, "repo": repo.name, "cursor": cursor }),
+        )?;
+        let page: Connection<BranchPr> =
+            serde_json::from_value(data["repository"]["pullRequests"].clone())
+                .with_context(|| format!("Failed to parse the open PRs of {repo}"))?;
+        prs.extend(page.nodes);
+        match page.page_info.next_cursor() {
+            Some(c) => cursor = Value::String(c),
+            None => break,
+        }
+    }
+    prs.sort_by_key(|p| p.number);
+    Ok(prs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +241,38 @@ mod tests {
         let pr = pr_by_number(&client, &repo, 7).unwrap().unwrap();
         assert_eq!(pr.head_repo.as_deref(), Some("fork/r"));
         assert_eq!(pr_by_number(&client, &repo, 8).unwrap(), None);
+    }
+
+    #[test]
+    fn open_prs_pages_and_sorts() {
+        let mut server = Server::new();
+        let page = |next: Option<&str>, number: u64, author: Value| {
+            json!({"data": {"repository": {"pullRequests": {
+                "pageInfo": {"hasNextPage": next.is_some(), "endCursor": next},
+                "nodes": [{
+                    "number": number, "state": "OPEN", "author": author,
+                    "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE"}}}]}
+                }]
+            }}}})
+            .to_string()
+        };
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"variables": {"owner": "o", "repo": "r", "cursor": null}}),
+            ))
+            .with_body(page(Some("c1"), 9, json!({"login": "someone"})))
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"cursor": "c1"}})))
+            .with_body(page(None, 3, json!(null)))
+            .create();
+        let client = Client::for_tests(&server.url());
+        let prs = open_prs(&client, &Repo::parse("o/r").unwrap()).unwrap();
+        let got: Vec<(u64, &str)> = prs.iter().map(|p| (p.number, p.author.as_str())).collect();
+        assert_eq!(got, vec![(3, "ghost"), (9, "someone")]);
+        assert_eq!(prs[0].checks.as_deref(), Some("FAILURE"));
     }
 
     #[test]
