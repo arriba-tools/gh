@@ -18,6 +18,8 @@ pub struct CheckRun {
     pub event: String,
     /// Actions workflow run, absent for checks from other apps.
     pub run_id: Option<u64>,
+    /// When the workflow run was created, which reruns of it leave unchanged.
+    pub run_created_at: Option<DateTime<Utc>>,
     pub status: String,
     pub conclusion: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
@@ -52,6 +54,7 @@ struct WorkflowRun {
     database_id: Option<u64>,
     #[serde(default, deserialize_with = "nullable")]
     event: String,
+    created_at: Option<String>,
     workflow: Option<Workflow>,
 }
 
@@ -64,19 +67,21 @@ struct Workflow {
 impl From<CheckRunNode> for CheckRun {
     fn from(node: CheckRunNode) -> Self {
         let run = node.check_suite.and_then(|s| s.workflow_run);
-        let (workflow, event, run_id) = match run {
+        let (workflow, event, run_id, run_created_at) = match run {
             Some(r) => (
                 r.workflow.map(|w| w.name).unwrap_or_default(),
                 r.event,
                 r.database_id,
+                lenient_time(r.created_at.as_deref()),
             ),
-            None => (String::new(), String::new(), None),
+            None => (String::new(), String::new(), None, None),
         };
         CheckRun {
             name: node.name,
             workflow,
             event,
             run_id,
+            run_created_at,
             status: node.status,
             conclusion: node.conclusion,
             started_at: lenient_time(node.started_at.as_deref()),
@@ -172,7 +177,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                   __typename
                   ... on CheckRun {
                     name status conclusion startedAt completedAt detailsUrl
-                    checkSuite { workflowRun { databaseId event workflow { name } } }
+                    checkSuite { workflowRun { databaseId event createdAt workflow { name } } }
                   }
                   ... on StatusContext { context state targetUrl }
                 }
@@ -286,6 +291,23 @@ mod tests {
             repo: Repo::parse("o/r").unwrap(),
             number: 7,
         }
+    }
+
+    #[test]
+    fn check_run_carries_its_workflow_run_creation_time() {
+        let node = json!({
+            "name": "Ubuntu", "status": "COMPLETED", "conclusion": "FAILURE",
+            "checkSuite": {"workflowRun": {
+                "databaseId": 10, "event": "push", "createdAt": "2026-01-02T03:04:05Z"
+            }}
+        });
+        let run: CheckRun = serde_json::from_value(node).unwrap();
+        assert_eq!(
+            run.run_created_at,
+            Some("2026-01-02T03:04:05Z".parse().unwrap())
+        );
+        let app: CheckRun = serde_json::from_value(json!({"name": "coderabbit"})).unwrap();
+        assert_eq!(app.run_created_at, None);
     }
 
     fn rollup_page(fields: Value, next: Option<&str>, nodes: Value) -> String {

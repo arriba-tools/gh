@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{TimeDelta, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -9,6 +10,9 @@ use crate::cli::RetryArgs;
 use crate::context::{Ctx, git};
 use crate::output;
 use crate::pr::rollup::latest;
+
+/// GitHub allows a workflow run to be rerun for this long after its initial run.
+const RERUN_WINDOW_DAYS: i64 = 30;
 
 struct Checks {
     title: String,
@@ -47,7 +51,7 @@ struct PrPlan {
     number: u64,
     title: String,
     runs: Vec<RunPlan>,
-    /// Failed checks that can't be rerun, such as external commit statuses.
+    /// Failed checks that can't be rerun, such as external commit statuses or expired runs.
     skipped: Vec<String>,
     pending: usize,
     /// GitHub Actions status when checks are stuck pending with no failures.
@@ -65,6 +69,7 @@ fn plan(pr: &PrRef, checks: Checks) -> PrPlan {
             .filter(|s| matches!(s.state.as_str(), "PENDING" | "EXPECTED"))
             .count();
 
+    let cutoff = Utc::now() - TimeDelta::days(RERUN_WINDOW_DAYS);
     let mut groups: BTreeMap<(String, u64), Vec<FailedJob>> = BTreeMap::new();
     let mut skipped = Vec::new();
     for run in &runs {
@@ -73,6 +78,16 @@ fn plan(pr: &PrRef, checks: Checks) -> PrPlan {
         }
         let conclusion = run.conclusion.as_deref().unwrap_or_default().to_lowercase();
         match run.run_id {
+            Some(id) if run.run_created_at.is_some_and(|t| t < cutoff) => {
+                // One entry per run, however many of its jobs failed.
+                let entry = format!(
+                    "{} ({id}, older than {RERUN_WINDOW_DAYS} days)",
+                    run.workflow
+                );
+                if !skipped.contains(&entry) {
+                    skipped.push(entry);
+                }
+            }
             Some(id) => groups
                 .entry((run.workflow.clone(), id))
                 .or_default()
@@ -261,19 +276,25 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
     Ok(())
 }
 
+/// The state of a PR with no runs to rerun. Skipped checks still failed, so it is not passing.
+fn idle_state(plan: &PrPlan) -> String {
+    if !plan.skipped.is_empty() {
+        "nothing to rerun".to_string()
+    } else if plan.pending > 0 {
+        format!("no failures, {} pending", plan.pending)
+    } else {
+        "all checks passing".to_string()
+    }
+}
+
 fn print_summary(plan: &PrPlan) {
     if plan.runs.is_empty() {
-        let state = if plan.pending > 0 {
-            format!("no failures, {} pending", plan.pending)
-        } else {
-            "all checks passing".to_string()
-        };
-        println!("PR #{} {}: {state}", plan.number, plan.title);
+        println!("PR #{} {}: {}", plan.number, plan.title, idle_state(plan));
     } else {
         print!("{}", render(plan));
     }
     for s in &plan.skipped {
-        println!("  skipped external status {s}");
+        println!("  skipped {s}");
     }
     if let Some(status) = plan
         .actions_status
@@ -443,6 +464,7 @@ mod tests {
             workflow: workflow.to_string(),
             event: "pull_request".to_string(),
             run_id,
+            run_created_at: None,
             status: if conclusion.is_some() {
                 "COMPLETED"
             } else {
@@ -569,6 +591,56 @@ mod tests {
              └── Lint (11)\n    \
              └── Lint (timed_out)\n"
         );
+    }
+
+    #[test]
+    fn plan_skips_runs_past_the_rerun_window() {
+        let aged = |name: &str, workflow: &str, run_id: u64, days: i64| {
+            let mut run = check(
+                name,
+                workflow,
+                Some(run_id),
+                Some("FAILURE"),
+                "2026-01-01T00:00:00Z",
+            );
+            run.run_created_at = Some(Utc::now() - TimeDelta::days(days));
+            run
+        };
+        let checks = Checks {
+            title: "Fix".to_string(),
+            runs: vec![
+                aged("Ubuntu", "Build", 10, 31),
+                aged("macOS", "Build", 10, 31),
+                aged("Lint", "Lint", 11, 29),
+            ],
+            statuses: Vec::new(),
+        };
+        let plan = plan(&pr(), checks);
+        let runs: Vec<u64> = plan.runs.iter().map(|r| r.run_id).collect();
+        assert_eq!(runs, vec![11]);
+        assert_eq!(plan.skipped, vec!["Build (10, older than 30 days)"]);
+    }
+
+    #[test]
+    fn idle_state_never_calls_a_skipped_failure_passing() {
+        let state = |skipped: &[&str], pending| {
+            idle_state(&PrPlan {
+                repo: "o/r".to_string(),
+                number: 7,
+                title: "Fix".to_string(),
+                runs: Vec::new(),
+                skipped: skipped.iter().map(|s| s.to_string()).collect(),
+                pending,
+                actions_status: None,
+            })
+        };
+        assert_eq!(state(&[], 0), "all checks passing");
+        assert_eq!(state(&[], 2), "no failures, 2 pending");
+        assert_eq!(
+            state(&["Build (10, older than 30 days)"], 0),
+            "nothing to rerun"
+        );
+        assert_eq!(state(&["ci/jenkins (error)"], 2), "nothing to rerun");
     }
 
     #[test]
