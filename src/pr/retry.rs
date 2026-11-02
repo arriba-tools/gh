@@ -316,12 +316,10 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
     let mut sent = HashSet::new();
     for (pr, plan) in prs.iter().zip(&mut plans) {
         for run in &mut plan.runs {
-            if !args.dry_run && sent.contains(&run.run_id) {
-                run.result = "already rerun".to_string();
-                continue;
-            }
             run.result = if args.dry_run {
                 "dry-run".to_string()
+            } else if sent.contains(&run.run_id) {
+                "already rerun".to_string()
             } else {
                 let path = format!(
                     "{}/actions/runs/{}/rerun-failed-jobs",
@@ -337,9 +335,10 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
                 }
             };
             if !ctx.json && !args.dry_run {
+                let (number, name) = (plan.number, format!("{} ({})", run.workflow, run.run_id));
                 match run.result.as_str() {
-                    "rerun" => println!("rerun {} ({})", run.workflow, run.run_id),
-                    err => eprintln!("failed to rerun {} ({}): {err}", run.workflow, run.run_id),
+                    done @ ("rerun" | "already rerun") => println!("PR #{number} {done} {name}"),
+                    err => eprintln!("PR #{number} failed to rerun {name}: {err}"),
                 }
             }
         }
