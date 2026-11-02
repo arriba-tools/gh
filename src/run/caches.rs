@@ -134,7 +134,7 @@ fn render(s: &Summary, filtered: bool, now: DateTime<Utc>) -> String {
     let mut out = format!(
         "{}: {} use {} of the default {} limit ({}%)\n",
         s.repo,
-        plural(s.total_count as usize, "cache"),
+        output::plural(s.total_count as usize, "cache"),
         output::size(s.total_bytes),
         output::size(s.limit_bytes),
         s.total_bytes * 100 / s.limit_bytes.max(1)
@@ -156,7 +156,7 @@ fn render(s: &Summary, filtered: bool, now: DateTime<Utc>) -> String {
             .map(|g| {
                 vec![
                     g.name.clone(),
-                    plural(g.count, "cache"),
+                    output::plural(g.count, "cache"),
                     output::size(g.size),
                     g.last_used
                         .map(|t| format!("used {} ago", output::age(now - t)))
@@ -282,7 +282,7 @@ fn prune(ctx: &Ctx, repo: &Repo, args: &CachesArgs, caches: &[Cache]) -> Result<
     say(&output::table(&rows, "  "));
     say(&format!(
         "{repo}: pruning {} frees {}",
-        plural(report.caches.len(), "cache"),
+        output::plural(report.caches.len(), "cache"),
         output::size(report.freed_bytes)
     ));
 
@@ -293,7 +293,7 @@ fn prune(ctx: &Ctx, repo: &Repo, args: &CachesArgs, caches: &[Cache]) -> Result<
             Ok(())
         };
     }
-    let question = format!("Delete {}?", plural(report.caches.len(), "cache"));
+    let question = format!("Delete {}?", output::plural(report.caches.len(), "cache"));
     if !prompt::confirm(&question, ctx.yes)? {
         say("Cancelled");
         return Ok(());
@@ -315,25 +315,16 @@ fn prune(ctx: &Ctx, repo: &Repo, args: &CachesArgs, caches: &[Cache]) -> Result<
     }
     println!(
         "Deleted {}, freeing {}",
-        plural(report.caches.len() - report.failed.len(), "cache"),
+        output::plural(report.caches.len() - report.failed.len(), "cache"),
         output::size(report.freed_bytes)
     );
     if !report.failed.is_empty() {
         bail!(
             "{} could not be deleted",
-            plural(report.failed.len(), "cache")
+            output::plural(report.failed.len(), "cache")
         );
     }
     Ok(())
-}
-
-/// `1 cache` or `3 caches`.
-fn plural(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{n} {noun}s")
-    }
 }
 
 #[cfg(test)]

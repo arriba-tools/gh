@@ -388,7 +388,7 @@ fn prune_at(ctx: &Ctx, root: &Path, args: &WorktreePruneArgs) -> Result<()> {
     }
     let question = format!(
         "Remove {} and their local branches?",
-        plural(report.removed.len(), "worktree")
+        output::plural(report.removed.len(), "worktree")
     );
     if !prompt::confirm(&question, ctx.yes)? {
         say("Cancelled");
@@ -410,13 +410,13 @@ fn prune_at(ctx: &Ctx, root: &Path, args: &WorktreePruneArgs) -> Result<()> {
     }
     say(&format!(
         "Removed {}",
-        plural(report.removed.len() - report.failed.len(), "worktree")
+        output::plural(report.removed.len() - report.failed.len(), "worktree")
     ));
     finish(ctx, &report)?;
     if !report.failed.is_empty() {
         anyhow::bail!(
             "{} could not be removed",
-            plural(report.failed.len(), "worktree")
+            output::plural(report.failed.len(), "worktree")
         );
     }
     Ok(())
@@ -427,15 +427,6 @@ fn finish(ctx: &Ctx, report: &PruneReport) -> Result<()> {
         output::print_json(report)?;
     }
     Ok(())
-}
-
-/// `1 worktree` or `3 worktrees`.
-fn plural(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{n} {noun}s")
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1084,12 +1075,6 @@ prunable gitdir file points to non-existent location
         };
         prune_at(&ctx(&server, true), &s.root(), &forced).unwrap();
         assert!(!path.exists());
-    }
-
-    #[test]
-    fn plural_counts() {
-        assert_eq!(plural(1, "worktree"), "1 worktree");
-        assert_eq!(plural(0, "worktree"), "0 worktrees");
     }
 
     #[test]
