@@ -68,6 +68,15 @@ pub fn table(rows: &[Vec<String>], indent: &str) -> String {
         .join("\n")
 }
 
+/// `1 cache` or `3 caches`.
+pub fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
 /// A run time such as `45s`, `3m12s`, or `1h05m`. Negative spans, from clock skew, read as `0s`.
 pub fn duration(seconds: i64) -> String {
     let s = seconds.max(0);
@@ -109,6 +118,12 @@ pub fn age(span: chrono::TimeDelta) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plural_counts() {
+        assert_eq!(plural(1, "worktree"), "1 worktree");
+        assert_eq!(plural(0, "worktree"), "0 worktrees");
+    }
 
     #[test]
     fn table_aligns_columns() {
