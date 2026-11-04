@@ -4,7 +4,7 @@ version = "1.9.2"
 edition = "2024"
 description = "GitHub CLI extension for review threads, CI retries, releases, Dependabot, and config sync"
 license = "MIT"
-repository = "https://github.com/nmoinvaz/gh-arriba"
+repository = "https://github.com/arriba-tools/gh"
 
 [dependencies]
 anyhow = "1.0.104"
