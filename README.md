@@ -1,8 +1,8 @@
 # gh-arriba
 
-[![Build](https://github.com/nmoinvaz/gh-arriba/actions/workflows/build.yml/badge.svg)](https://github.com/nmoinvaz/gh-arriba/actions/workflows/build.yml)
-[![Lint](https://github.com/nmoinvaz/gh-arriba/actions/workflows/lint.yml/badge.svg)](https://github.com/nmoinvaz/gh-arriba/actions/workflows/lint.yml)
-[![codecov](https://codecov.io/gh/nmoinvaz/gh-arriba/graph/badge.svg)](https://codecov.io/gh/nmoinvaz/gh-arriba)
+[![Build](https://github.com/arriba-tools/gh/actions/workflows/build.yml/badge.svg)](https://github.com/arriba-tools/gh/actions/workflows/build.yml)
+[![Lint](https://github.com/arriba-tools/gh/actions/workflows/lint.yml/badge.svg)](https://github.com/arriba-tools/gh/actions/workflows/lint.yml)
+[![codecov](https://codecov.io/gh/arriba-tools/gh/graph/badge.svg)](https://codecov.io/gh/arriba-tools/gh)
 
 A GitHub CLI extension for the chores `gh` doesn't cover: review threads, pending reviews,
 CI retries, signed rebases, releases, Dependabot, and project config sync.
