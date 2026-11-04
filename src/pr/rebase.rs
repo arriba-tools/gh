@@ -117,16 +117,19 @@ fn local(pr: &PrRef, info: &PrInfo, check: bool) -> Result<Outcome> {
         git(&["rev-parse", "--show-toplevel"])
             .with_context(|| format!("Run inside a clone of {}", pr.repo))?,
     );
-    let remote = find_remote(&git_in(&root, &["remote", "-v"])?, &pr.repo).with_context(|| {
+    let remotes = git_in(&root, &["remote", "-v"])?;
+    let remote = find_remote(&remotes, &pr.repo, "(fetch)").with_context(|| {
         format!(
             "No git remote points at {}. Run inside a clone of it.",
             pr.repo
         )
     })?;
-    if info.cross_repository && !check {
-        let fork = info.head_repo.as_deref().unwrap_or("a fork");
-        bail!("{pr} comes from {fork}. Rebase it with --remote, or from a clone of the fork.");
-    }
+    // --check pushes nothing, so it needs no remote for the fork.
+    let push = if check {
+        remote.clone()
+    } else {
+        push_remote(&remotes, pr, info)?
+    };
 
     // The pull ref serves the head for forks too, which --check relies on.
     let base_ref = format!("refs/remotes/{remote}/{}", info.base_ref);
@@ -163,10 +166,39 @@ fn local(pr: &PrRef, info: &PrInfo, check: bool) -> Result<Outcome> {
     }
 
     let current = git_in(&root, &["branch", "--show-current"]).unwrap_or_default();
-    if !check && current == info.head_ref {
-        return in_place(pr, info, &root, &remote, &base_oid);
+    if !check && checkout_is_head(&root, &current, &push, info) {
+        return in_place(pr, info, &root, &push, &base_oid);
     }
-    in_worktree(pr, info, &root, &remote, &base_oid, check)
+    in_worktree(pr, info, &root, &push, &base_oid, check)
+}
+
+/// Whether the checked-out branch is the PR's head. Branch names repeat across forks, so a fork's
+/// branch must also track the remote the head is pushed to.
+fn checkout_is_head(root: &Path, current: &str, push: &str, info: &PrInfo) -> bool {
+    current == info.head_ref
+        && (!info.cross_repository
+            || git_in(root, &["config", &format!("branch.{current}.remote")])
+                .is_ok_and(|r| r == push))
+}
+
+/// The remote to push the head to, chosen by push URL since that is where git sends the push.
+/// A fork's head goes to the fork, while the base is still fetched from the PR's repo.
+fn push_remote(remotes: &str, pr: &PrRef, info: &PrInfo) -> Result<String> {
+    if !info.cross_repository {
+        return find_remote(remotes, &pr.repo, "(push)").with_context(|| {
+            format!(
+                "No git remote pushes to {}. Add one, or rebase with --remote.",
+                pr.repo
+            )
+        });
+    }
+    let fork = info
+        .head_repo
+        .as_deref()
+        .with_context(|| format!("{pr} comes from a fork that no longer exists"))?;
+    find_remote(remotes, &Repo::parse(fork)?, "(push)").with_context(|| {
+        format!("{pr} comes from {fork}, and no git remote pushes to it. Add one, or rebase with --remote.")
+    })
 }
 
 /// Rebase the checked-out head branch itself.
@@ -312,18 +344,18 @@ fn push_from(dir: &Path, remote: &str, info: &PrInfo) -> Result<String> {
     Ok(new_head)
 }
 
-/// Name of the remote whose fetch URL points at `repo`, preferring origin.
-fn find_remote(remotes: &str, repo: &Repo) -> Option<String> {
+/// Name of the remote whose `kind` URL, "(fetch)" or "(push)", points at `repo`, preferring origin.
+fn find_remote(remotes: &str, repo: &Repo, kind: &str) -> Option<String> {
     let matching: Vec<&str> = remotes
         .lines()
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
-            let (name, url, kind) = (parts.next()?, parts.next()?, parts.next()?);
+            let (name, url, line_kind) = (parts.next()?, parts.next()?, parts.next()?);
             let parsed = Repo::parse(url).ok()?;
             // GitHub owner and repo names are case-insensitive.
             let same = parsed.owner.eq_ignore_ascii_case(&repo.owner)
                 && parsed.name.eq_ignore_ascii_case(&repo.name);
-            (kind == "(fetch)" && same).then_some(name)
+            (line_kind == kind && same).then_some(name)
         })
         .collect();
     matching
@@ -572,8 +604,11 @@ fork\tgit@github.com:nmoinvaz/zlib-ng.git (fetch)
 fork\tgit@github.com:nmoinvaz/zlib-ng.git (push)
 upstream\thttps://github.com/Zlib-NG/zlib-ng (fetch)
 upstream\thttps://github.com/Zlib-NG/zlib-ng (push)";
-        assert_eq!(find_remote(remotes, &repo).as_deref(), Some("upstream"));
-        assert_eq!(find_remote("", &repo), None);
+        assert_eq!(
+            find_remote(remotes, &repo, "(fetch)").as_deref(),
+            Some("upstream")
+        );
+        assert_eq!(find_remote("", &repo, "(fetch)"), None);
     }
 
     #[test]
@@ -582,7 +617,53 @@ upstream\thttps://github.com/Zlib-NG/zlib-ng (push)";
         let remotes = "\
 mirror\thttps://github.com/a/b (fetch)
 origin\tgit@github.com:a/b.git (fetch)";
-        assert_eq!(find_remote(remotes, &repo).as_deref(), Some("origin"));
+        assert_eq!(
+            find_remote(remotes, &repo, "(fetch)").as_deref(),
+            Some("origin")
+        );
+    }
+
+    fn zlib_ng_pr() -> (PrRef, PrInfo) {
+        let pr = PrRef {
+            repo: Repo::parse("zlib-ng/zlib-ng").unwrap(),
+            number: 7,
+        };
+        let info: PrInfo = serde_json::from_value(json!({
+            "number": 7, "createdAt": "2026-01-01T00:00:00Z",
+            "baseRefName": "develop", "headRefName": "fix"
+        }))
+        .unwrap();
+        (pr, info)
+    }
+
+    #[test]
+    fn fork_prs_push_to_the_fork_remote() {
+        let remotes = "\
+origin\tgit@github.com:nmoinvaz/zlib-ng (fetch)
+origin\tgit@github.com:nmoinvaz/zlib-ng (push)
+upstream\tgit@github.com:zlib-ng/zlib-ng (fetch)
+upstream\tgit@github.com:zlib-ng/zlib-ng (push)";
+        let (pr, mut info) = zlib_ng_pr();
+        assert_eq!(push_remote(remotes, &pr, &info).unwrap(), "upstream");
+
+        info.cross_repository = true;
+        info.head_repo = Some("NMoinvaz/zlib-ng".into());
+        assert_eq!(push_remote(remotes, &pr, &info).unwrap(), "origin");
+
+        info.head_repo = Some("someone/zlib-ng".into());
+        let err = push_remote(remotes, &pr, &info).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "zlib-ng/zlib-ng#7 comes from someone/zlib-ng, and no git remote pushes to it. \
+             Add one, or rebase with --remote."
+        );
+
+        info.head_repo = None;
+        let err = push_remote(remotes, &pr, &info).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "zlib-ng/zlib-ng#7 comes from a fork that no longer exists"
+        );
     }
 
     #[test]
@@ -591,7 +672,42 @@ origin\tgit@github.com:a/b.git (fetch)";
         let remotes = "\
 origin\thttps://github.com/x/y (fetch)
 origin\thttps://github.com/a/b (push)";
-        assert_eq!(find_remote(remotes, &repo), None);
+        assert_eq!(find_remote(remotes, &repo, "(fetch)"), None);
+    }
+
+    #[test]
+    fn push_remote_follows_push_urls() {
+        // upstream fetches the PR's repo but pushes to the fork, so neither push may pick it.
+        let remotes = "\
+upstream\tgit@github.com:zlib-ng/zlib-ng (fetch)
+upstream\tgit@github.com:someone/zlib-ng (push)";
+        let (pr, mut info) = zlib_ng_pr();
+        let err = push_remote(remotes, &pr, &info).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "No git remote pushes to zlib-ng/zlib-ng. Add one, or rebase with --remote."
+        );
+
+        info.cross_repository = true;
+        info.head_repo = Some("someone/zlib-ng".into());
+        assert_eq!(push_remote(remotes, &pr, &info).unwrap(), "upstream");
+    }
+
+    #[test]
+    fn fork_checkouts_must_track_the_push_remote() {
+        let s = Scratch::new("tracking");
+        s.git(&["checkout", "--quiet", "-b", "fix"]);
+        let (_, mut info) = zlib_ng_pr();
+        assert!(checkout_is_head(&s.0, "fix", "origin", &info));
+        assert!(!checkout_is_head(&s.0, "main", "origin", &info));
+
+        // A fork's branch of the same name counts only when it tracks the push remote.
+        info.cross_repository = true;
+        assert!(!checkout_is_head(&s.0, "fix", "origin", &info));
+        s.git(&["config", "branch.fix.remote", "other"]);
+        assert!(!checkout_is_head(&s.0, "fix", "origin", &info));
+        s.git(&["config", "branch.fix.remote", "origin"]);
+        assert!(checkout_is_head(&s.0, "fix", "origin", &info));
     }
 
     /// A scratch repo with `topic` branched from `main`, each with one commit touching `file`,
