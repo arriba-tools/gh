@@ -1,6 +1,6 @@
 [package]
 name = "gh-arriba"
-version = "1.9.2"
+version = "1.9.3"
 edition = "2024"
 description = "GitHub CLI extension for review threads, CI retries, releases, Dependabot, and config sync"
 license = "MIT"
