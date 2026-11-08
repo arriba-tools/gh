@@ -15,6 +15,7 @@ mod prompt;
 mod release;
 mod run;
 mod runners;
+mod upload;
 mod workflow;
 mod worktree;
 
@@ -46,6 +47,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Pr(cmd) => pr::run(&ctx()?, cmd),
+        Command::Upload(args) => upload::run(&ctx()?, args),
         Command::Run(cmd) => run::run(&ctx()?, cmd),
         Command::Release(args) => release::run(&ctx()?, args),
         Command::Dependabot(cmd) => dependabot::run(&ctx()?, cmd),
