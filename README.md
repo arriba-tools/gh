@@ -499,12 +499,16 @@ Uses the token from `gh auth token`, falling back to `GH_TOKEN` or `GITHUB_TOKEN
 ## Development
 
 ```
+git clone https://github.com/arriba-tools/gh.git gh-arriba
+cd gh-arriba
 cargo build --release
 cp target/release/gh-arriba .
 gh extension install .
 ```
 
-The copied binary is ignored by git. Rebuild and copy it again to pick up changes.
+The checkout must be named `gh-arriba`, since `gh` names a local extension after its directory and
+refuses one without the `gh-` prefix. The copied binary is ignored by git. Rebuild and copy it again
+to pick up changes.
 
 `gh` only installs repositories named `gh-*`, so the install goes through `arriba-tools/gh-arriba`,
 a redirect GitHub keeps from a past name of `arriba-tools/gh`. Creating a repository by that name
