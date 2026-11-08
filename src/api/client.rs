@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Method;
 use reqwest::blocking::{Client as Http, RequestBuilder, Response};
-use reqwest::header::{IF_MODIFIED_SINCE, LAST_MODIFIED, LINK};
+use reqwest::header::{CONTENT_TYPE, IF_MODIFIED_SINCE, LAST_MODIFIED, LINK};
 use serde_json::{Value, json};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -23,6 +23,8 @@ pub struct Client {
     token: String,
     api: String,
     graphql: String,
+    /// Host that takes files for use in comments, None on GitHub Enterprise Server, which has none.
+    uploads: Option<String>,
     viewer: OnceLock<String>,
 }
 
@@ -34,15 +36,17 @@ impl Client {
             .unwrap_or_else(|| "github.com".to_string());
         let token = get_github_token(&host)?;
         // GitHub Enterprise Server serves the API under the host itself.
-        let (api, graphql) = if host == "github.com" {
+        let (api, graphql, uploads) = if host == "github.com" {
             (
                 "https://api.github.com".to_string(),
                 "https://api.github.com/graphql".to_string(),
+                Some("https://uploads.github.com".to_string()),
             )
         } else {
             (
                 format!("https://{host}/api/v3"),
                 format!("https://{host}/api/graphql"),
+                None,
             )
         };
         let http = Http::builder()
@@ -54,6 +58,7 @@ impl Client {
             token,
             api,
             graphql,
+            uploads,
             viewer: OnceLock::new(),
         })
     }
@@ -68,6 +73,7 @@ impl Client {
             token: "test-token".to_string(),
             api: base.to_string(),
             graphql: format!("{base}/graphql"),
+            uploads: Some(base.to_string()),
             viewer: OnceLock::new(),
         }
     }
@@ -238,6 +244,22 @@ impl Client {
 
     pub fn delete(&self, path: &str) -> Result<Value> {
         parse_json(self.send(Method::DELETE, path, None)?)
+    }
+
+    /// POST raw bytes to a path on the uploads host, with `query` as its parameters.
+    pub fn upload(&self, path: &str, query: &[(&str, &str)], body: Vec<u8>) -> Result<Value> {
+        let Some(base) = &self.uploads else {
+            bail!("Uploads are not supported on GitHub Enterprise Server");
+        };
+        let url = format!("{base}/{}", path.trim_start_matches('/'));
+        let resp = self
+            .request(Method::POST, &url)
+            .query(query)
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .body(body)
+            .send()
+            .with_context(|| format!("POST {path} failed"))?;
+        parse_json(check(resp, &Method::POST, path)?)
     }
 
     /// Run a GraphQL query and return its `data`. Any entry in `errors` fails the call.

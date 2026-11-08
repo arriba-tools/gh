@@ -30,6 +30,11 @@ pub enum Command {
     /// Review threads, pending reviews, retries, and rebases for pull requests
     #[command(subcommand)]
     Pr(PrCommand),
+    /// Upload images and print the markdown that shows them in a comment
+    ///
+    /// GitHub hosts each image against the repository, which needs write access to it. An upload
+    /// cannot be undone.
+    Upload(UploadArgs),
     /// Watch workflow runs and download their logs
     #[command(subcommand)]
     Run(RunCommand),
@@ -51,6 +56,13 @@ pub enum Command {
     Inbox(InboxCommand),
     /// Sync project config files to and from a gist
     Config(ConfigArgs),
+}
+
+#[derive(Args)]
+pub struct UploadArgs {
+    /// Images to upload, each with optional alt text after `#`, as in `login.png#Login error`
+    #[arg(required = true, value_name = "FILE[#ALT]")]
+    pub files: Vec<String>,
 }
 
 #[derive(Subcommand)]

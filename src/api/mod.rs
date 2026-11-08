@@ -2,6 +2,7 @@
 //! shape its requests and read its responses.
 
 pub mod actions;
+pub mod attachments;
 mod client;
 pub mod dependabot;
 pub mod gists;

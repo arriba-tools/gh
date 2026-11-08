@@ -16,6 +16,7 @@ agents can drive the same workflows a person runs by hand.
 - [Use with Claude](#use-with-claude)
 - [Usage](#usage)
   - [Pull requests](#pull-requests)
+  - [Uploads](#uploads)
   - [Workflows and releases](#workflows-and-releases)
   - [Dependabot](#dependabot)
   - [Runners](#runners)
@@ -88,6 +89,16 @@ gh arriba [options] <command>
 `PR` is a number, URL, `owner/repo#N`, or branch. It defaults to the PR for the current branch.
 `ID` in `pr reply` and `pr resolve` is a comment ID, a `#discussion_r` comment link, or a
 `PRRT_` thread ID.
+
+### Uploads
+
+| Command | Description |
+|---------|-------------|
+| `upload <FILE[#ALT]>...` | Upload images for use inline in comments and print the markdown that shows them |
+
+Each image is stored against the repository from `-R` or the working directory, which needs write
+access. PNG, JPEG, GIF, WebP, and SVG images up to 10 MiB are accepted. An upload cannot be undone,
+and GitHub Enterprise Server has no upload endpoint.
 
 ### Workflows and releases
 
@@ -226,6 +237,13 @@ Build up a review with inline comments, then submit it:
 gh arriba pr review lines 42
 gh arriba pr review add 42 src/inflate.c:120-124 "This drops the window check."
 gh arriba pr review submit 42 --event request-changes --body "See inline comments."
+```
+
+Upload a screenshot and show it in a reply:
+
+```
+img=$(gh arriba upload './login.png#The login error')
+gh arriba pr reply 1234567890 "Fixed, it now renders like this. $img"
 ```
 
 Check which labels exist or fit the PR, then add one by a loose name:
