@@ -1,8 +1,8 @@
 # gh-arriba
 
-[![Build](https://github.com/arriba-tools/gh/actions/workflows/build.yml/badge.svg)](https://github.com/arriba-tools/gh/actions/workflows/build.yml)
-[![Lint](https://github.com/arriba-tools/gh/actions/workflows/lint.yml/badge.svg)](https://github.com/arriba-tools/gh/actions/workflows/lint.yml)
-[![codecov](https://codecov.io/gh/arriba-tools/gh/graph/badge.svg)](https://codecov.io/gh/arriba-tools/gh)
+[![Build](https://github.com/arriba-tools/gh-arriba/actions/workflows/build.yml/badge.svg)](https://github.com/arriba-tools/gh-arriba/actions/workflows/build.yml)
+[![Lint](https://github.com/arriba-tools/gh-arriba/actions/workflows/lint.yml/badge.svg)](https://github.com/arriba-tools/gh-arriba/actions/workflows/lint.yml)
+[![codecov](https://codecov.io/gh/arriba-tools/gh-arriba/graph/badge.svg)](https://codecov.io/gh/arriba-tools/gh-arriba)
 
 A GitHub CLI extension for the chores `gh` doesn't cover: review threads, pending reviews,
 CI retries, signed rebases, releases, Dependabot, and project config sync.
@@ -499,16 +499,14 @@ Uses the token from `gh auth token`, falling back to `GH_TOKEN` or `GITHUB_TOKEN
 ## Development
 
 ```
+git clone https://github.com/arriba-tools/gh-arriba.git
+cd gh-arriba
 cargo build --release
 cp target/release/gh-arriba .
 gh extension install .
 ```
 
 The copied binary is ignored by git. Rebuild and copy it again to pick up changes.
-
-`gh` only installs repositories named `gh-*`, so the install goes through `arriba-tools/gh-arriba`,
-a redirect GitHub keeps from a past name of `arriba-tools/gh`. Creating a repository by that name
-would break installs and upgrades.
 
 ## License
 
