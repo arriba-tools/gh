@@ -595,13 +595,18 @@ pub fn do_remove(
 
     let id = gist_id.context("No gist found")?;
 
-    let manifest = read_manifest(client, id, config)?.context("No manifest found in gist")?;
+    let gist = client.get_gist(id)?;
+    let manifest = gist
+        .file_content(&config.manifest_name())
+        .and_then(Manifest::from_yaml)
+        .context("No manifest found in gist")?;
+    let stored: HashSet<String> = gist.file_names().into_iter().collect();
 
     let remove_set: HashSet<String> = files.iter().map(|f| config.relative_path(f)).collect();
 
     // Without --platform, removing by path drops every variant of that path.
     // With it, only the variant scoped to the current platform is removed.
-    // Either way, delete each matched entry's stored gist file.
+    // Either way, delete each matched entry's stored gist file if the gist has one.
     let current = current_platform();
     let (removed, remaining): (Vec<ManifestFile>, Vec<ManifestFile>) =
         manifest.files.into_iter().partition(|e| {
@@ -618,7 +623,10 @@ pub fn do_remove(
 
     let mut updates: HashMap<String, Option<String>> = HashMap::new();
     for entry in &removed {
-        updates.insert(entry.gist.clone(), None);
+        // GitHub rejects deleting a file the gist lacks with 422.
+        if stored.contains(&entry.gist) {
+            updates.insert(entry.gist.clone(), None);
+        }
         let suffix = entry
             .platform
             .as_deref()
@@ -630,7 +638,7 @@ pub fn do_remove(
     updates.insert(config.manifest_name(), Some(new_manifest.to_yaml()));
 
     client.update_files(id, &updates)?;
-    print_gist_url(id, is_gist_private(client, id)?);
+    print_gist_url(id, gist.is_private());
 
     Ok(())
 }
@@ -1297,12 +1305,18 @@ mod tests {
         ]
     }
 
+    /// Each entry's stored gist file, in the form `gist_json` takes.
+    fn stored(entries: &[ManifestFile]) -> Vec<(&str, &str)> {
+        entries.iter().map(|e| (e.gist.as_str(), "x")).collect()
+    }
+
     #[test]
     fn remove_by_path_drops_every_platform_variant() {
         let root = Root::new("remove");
         let c = root.config();
+        let entries = platform_variants(&c);
         let mut server = Server::new();
-        serve_gist(&mut server, gist_json(&c, &platform_variants(&c), &[]));
+        serve_gist(&mut server, gist_json(&c, &entries, &stored(&entries)));
         let (_patch, seen) = capture(&mut server, "PATCH", "/gists/g1");
         let client = Client::for_tests(&server.url());
 
@@ -1330,8 +1344,9 @@ mod tests {
     fn remove_with_platform_drops_only_this_platform() {
         let root = Root::new("remove-platform");
         let c = root.config();
+        let entries = platform_variants(&c);
         let mut server = Server::new();
-        serve_gist(&mut server, gist_json(&c, &platform_variants(&c), &[]));
+        serve_gist(&mut server, gist_json(&c, &entries, &stored(&entries)));
         let (_patch, seen) = capture(&mut server, "PATCH", "/gists/g1");
         let client = Client::for_tests(&server.url());
 
@@ -1357,6 +1372,36 @@ mod tests {
             .map(|f| f.platform.as_deref())
             .collect();
         assert_eq!(left, vec![Some(OTHER_OS), None]);
+    }
+
+    #[test]
+    fn remove_skips_deleting_files_the_gist_lacks() {
+        let root = Root::new("remove-unstored");
+        let c = root.config();
+        let entries = vec![
+            entry(&c, "gone.txt", None, 0),
+            entry(&c, "keep.txt", None, 0),
+        ];
+        let mut server = Server::new();
+        serve_gist(&mut server, gist_json(&c, &entries, &stored(&entries[1..])));
+        let (_patch, seen) = capture(&mut server, "PATCH", "/gists/g1");
+        let client = Client::for_tests(&server.url());
+
+        do_remove(
+            &GistClient::new(&client),
+            &c,
+            &["gone.txt".into()],
+            false,
+            Some("g1"),
+        )
+        .unwrap();
+
+        // gone.txt has no stored file, so only the manifest is written.
+        let files = sent_files(&seen);
+        assert_eq!(files.keys().collect::<Vec<_>>(), vec![&c.manifest_name()]);
+        let manifest = sent_manifest(&c, &files);
+        let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["keep.txt"]);
     }
 
     #[test]
