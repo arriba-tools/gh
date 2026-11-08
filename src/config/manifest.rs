@@ -33,7 +33,7 @@ impl Manifest {
             name: config.name.clone(),
             description: "Configuration files synced by config-sync".to_string(),
             repo: config.repo_url(),
-            url: "https://github.com/nmoinvaz/gh-arriba".to_string(),
+            url: env!("CARGO_PKG_REPOSITORY").to_string(),
             files: files.to_vec(),
         }
     }
