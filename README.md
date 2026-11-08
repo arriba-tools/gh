@@ -41,7 +41,7 @@ agents can drive the same workflows a person runs by hand.
 ## Install
 
 ```
-gh extension install nmoinvaz/gh-arriba
+gh extension install arriba-tools/gh-arriba
 ```
 
 Upgrade with `gh extension upgrade arriba`.
@@ -505,6 +505,10 @@ gh extension install .
 ```
 
 The copied binary is ignored by git. Rebuild and copy it again to pick up changes.
+
+`gh` only installs repositories named `gh-*`, so the install goes through `arriba-tools/gh-arriba`,
+a redirect GitHub keeps from a past name of `arriba-tools/gh`. Creating a repository by that name
+would break installs and upgrades.
 
 ## License
 
