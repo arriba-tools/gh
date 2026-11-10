@@ -19,6 +19,7 @@ agents can drive the same workflows a person runs by hand.
   - [Uploads](#uploads)
   - [Workflows and releases](#workflows-and-releases)
   - [Issues](#issues)
+  - [Repositories](#repositories)
   - [Dependabot](#dependabot)
   - [Runners](#runners)
   - [Worktrees](#worktrees)
@@ -128,6 +129,21 @@ With `--state KEY` the watch remembers what was acknowledged. Printing a comment
 acknowledge it. Restart with the `--ack` the command printed once the comments are handled, so a
 caller that stops first sees them again. The first run under a key looks back 24 hours, and a watch
 without `--state` reports only what arrives while it waits.
+
+### Repositories
+
+| Command | Description |
+|---------|-------------|
+| `repo watch` | Wait for commits that add or change files on a branch and print the files, under `--path` and filtered by contents with `--match` and `--not-match` |
+
+`repo watch` watches the default branch unless `--branch` names another. It exits with the same
+statuses as `issue watch`, and an unchanged branch costs nothing against the rate limit.
+
+With `--state KEY` the watch remembers the commit it reached. Printing a file does not acknowledge
+it. Restart with the `--ack` the command printed once the files are handled. Commits that bring
+nothing wanted are passed over without an acknowledgement. The first run under a key starts at the
+newest commit at least 24 hours old, and a watch without `--state` reports only what arrives while
+it waits. GitHub lists at most 300 changed files between two commits.
 
 ### Dependabot
 
@@ -274,6 +290,12 @@ Wait for an issue to be queued for this machine and not yet taken:
 
 ```
 gh arriba issue watch --label win2 --not-label running
+```
+
+Wait for a file addressed to this machine to land in a folder of another repository:
+
+```
+gh arriba repo watch -R owner/inbox --path queue/ --state win2 --match '(?m)^to: win2$'
 ```
 
 Check which labels exist or fit the PR, then add one by a loose name:
