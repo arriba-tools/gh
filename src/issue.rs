@@ -366,6 +366,7 @@ mod tests {
         Filter {
             matches: matches.map(|p| Regex::new(p).unwrap()),
             not_match: not_match.map(|p| Regex::new(p).unwrap()),
+            replies: None,
         }
     }
 

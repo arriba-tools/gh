@@ -768,6 +768,11 @@ pub struct RepoWatchArgs {
     #[arg(long, value_name = "REGEX")]
     pub not_match: Option<String>,
 
+    /// Only files with a `re:` line naming this path, the replies to that message, repeated to
+    /// wait on replies to several
+    #[arg(long = "re", value_name = "PATH")]
+    pub re: Vec<String>,
+
     /// Remember progress under this name, so a restart picks up where the last one stopped
     #[arg(long, value_name = "KEY")]
     pub state: Option<String>,
