@@ -40,6 +40,9 @@ pub enum Command {
     Run(RunCommand),
     /// Dispatch the repo's release workflow with a version bump
     Release(ReleaseArgs),
+    /// Wait on an issue for new comments, or on a repo for labelled issues
+    #[command(subcommand)]
+    Issue(IssueCommand),
     /// Triage Dependabot pull requests and security alerts
     #[command(subcommand)]
     Dependabot(DependabotCommand),
@@ -673,6 +676,58 @@ pub enum Bump {
     Patch,
     Minor,
     Major,
+}
+
+#[derive(Subcommand)]
+pub enum IssueCommand {
+    /// Wait for new comments on an issue, or for open issues with a label, then print them
+    ///
+    /// Exits 0 after printing what arrived, 3 when nothing arrived before the timeout, and 4 when
+    /// GitHub could not be reached for five polls in a row. A pull request number works too.
+    ///
+    /// With --state, printing a comment does not acknowledge it. Restart with the --ack the
+    /// command printed once the comments are handled, so a caller that stops first sees them
+    /// again.
+    Watch(IssueWatchArgs),
+}
+
+#[derive(Args)]
+pub struct IssueWatchArgs {
+    /// Issue or pull request to wait for comments on
+    #[arg(value_name = "NUMBER", required_unless_present = "label")]
+    pub number: Option<u64>,
+
+    /// Wait for open issues with this label instead, repeated to require several
+    #[arg(long, value_name = "LABEL", conflicts_with = "number")]
+    pub label: Vec<String>,
+
+    /// Skip issues that also have this label
+    #[arg(long, value_name = "LABEL", requires = "label")]
+    pub not_label: Vec<String>,
+
+    /// Only comments whose body matches this regex
+    #[arg(long = "match", value_name = "REGEX", conflicts_with = "label")]
+    pub matches: Option<String>,
+
+    /// Skip comments whose body matches this regex
+    #[arg(long, value_name = "REGEX", conflicts_with = "label")]
+    pub not_match: Option<String>,
+
+    /// Remember progress under this name, so a restart picks up where the last one stopped
+    #[arg(long, value_name = "KEY")]
+    pub state: Option<String>,
+
+    /// Acknowledge comments up to this ID before waiting
+    #[arg(long, value_name = "ID", requires = "state", conflicts_with = "label")]
+    pub ack: Option<u64>,
+
+    /// Seconds between polls
+    #[arg(long, value_name = "SECS", default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
+    pub interval: u64,
+
+    /// Minutes to wait before giving up
+    #[arg(long, value_name = "MINS", default_value_t = 110)]
+    pub timeout: u64,
 }
 
 #[derive(Subcommand)]

@@ -3,6 +3,8 @@
 
 mod icon;
 
+pub(crate) use icon::data_dir;
+
 use std::path::{Path, PathBuf};
 
 use crate::output::xml_escape;

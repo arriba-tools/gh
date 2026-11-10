@@ -52,7 +52,7 @@ pub fn prepare(os: &str) -> Icon {
 }
 
 /// This user's gh-arriba data directory on `os`, from the variables `env` reads.
-fn data_dir(os: &str, env: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+pub(crate) fn data_dir(os: &str, env: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
     let env = |name: &str| env(name).filter(|p| !p.as_os_str().is_empty());
     let base = match os {
         "macos" => env("HOME")?.join("Library/Application Support"),

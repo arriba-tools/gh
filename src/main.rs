@@ -5,6 +5,7 @@ mod context;
 mod dependabot;
 mod focus;
 mod inbox;
+mod issue;
 mod log;
 mod notifications;
 mod notify;
@@ -50,6 +51,7 @@ fn main() -> Result<()> {
         Command::Upload(args) => upload::run(&ctx()?, args),
         Command::Run(cmd) => run::run(&ctx()?, cmd),
         Command::Release(args) => release::run(&ctx()?, args),
+        Command::Issue(cmd) => issue::run(&ctx()?, cmd),
         Command::Dependabot(cmd) => dependabot::run(&ctx()?, cmd),
         Command::Runners(args) => runners::run(&ctx()?, args),
         Command::Worktree(cmd) => worktree::run(&ctx()?, cmd),

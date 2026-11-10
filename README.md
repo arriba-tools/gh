@@ -18,6 +18,7 @@ agents can drive the same workflows a person runs by hand.
   - [Pull requests](#pull-requests)
   - [Uploads](#uploads)
   - [Workflows and releases](#workflows-and-releases)
+  - [Issues](#issues)
   - [Dependabot](#dependabot)
   - [Runners](#runners)
   - [Worktrees](#worktrees)
@@ -111,6 +112,22 @@ and GitHub Enterprise Server has no upload endpoint.
 | `run caches` | Show Actions cache usage against the repo's 10 GB limit, grouped by ref and key, or delete caches with `--prune` |
 | `run stats` | Show each job's pass rate, flaky re-runs, and median and p90 run time over a branch's recent runs, one workflow with `-w` |
 | `release` | Dispatch the repo's release workflow with a version bump, previewing with `--dry-run` |
+
+### Issues
+
+| Command | Description |
+|---------|-------------|
+| `issue watch <NUMBER>` | Wait for new comments on an issue or PR and print them, filtered with `--match` and `--not-match` |
+| `issue watch --label <LABEL>` | Wait for open issues with a label and print them, skipping ones that also have `--not-label` |
+
+`issue watch` exits 0 after printing what arrived, 3 when nothing arrived before `--timeout`, and 4
+when GitHub could not be reached for five polls in a row. An unchanged issue costs nothing against
+the rate limit, so the default 15 second interval is safe to leave running.
+
+With `--state KEY` the watch remembers what was acknowledged. Printing a comment does not
+acknowledge it. Restart with the `--ack` the command printed once the comments are handled, so a
+caller that stops first sees them again. The first run under a key looks back 24 hours, and a watch
+without `--state` reports only what arrives while it waits.
 
 ### Dependabot
 
@@ -244,6 +261,19 @@ Upload a screenshot and show it in a reply:
 ```
 img=$(gh arriba upload './login.png#The login error')
 gh arriba pr reply 1234567890 "Fixed, it now renders like this. $img"
+```
+
+Block until someone answers on an issue, then pick up where the last run stopped:
+
+```
+gh arriba issue watch 42 --state me --not-match '^/skip'
+gh arriba issue watch 42 --state me --ack 1234567890 --not-match '^/skip'
+```
+
+Wait for an issue to be queued for this machine and not yet taken:
+
+```
+gh arriba issue watch --label win2 --not-label running
 ```
 
 Check which labels exist or fit the PR, then add one by a loose name:
