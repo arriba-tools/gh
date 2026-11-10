@@ -1,7 +1,7 @@
 //! What the watch commands share: polling until something arrives, the state a named watch keeps,
 //! and the exit statuses that tell a caller how the wait ended.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::TimeDelta;
 use regex::Regex;
 use serde::Serialize;
@@ -68,6 +68,8 @@ impl Store {
 pub struct Filter {
     pub matches: Option<Regex>,
     pub not_match: Option<Regex>,
+    /// A `re:` line that names one of the paths given to --re, when any were.
+    pub replies: Option<Regex>,
 }
 
 impl Filter {
@@ -82,11 +84,31 @@ impl Filter {
         Ok(Self {
             matches: compile(matches, "--match")?,
             not_match: compile(not_match, "--not-match")?,
+            replies: None,
         })
+    }
+
+    /// Also require a `re:` line naming one of `paths`, the replies to those messages. The paths
+    /// are matched as written, and a line may end in spaces or a carriage return.
+    pub fn replying_to(mut self, paths: &[String]) -> Result<Self> {
+        if !paths.is_empty() {
+            // An empty path, as from an unset shell variable, would match only a blank re: line.
+            if paths.iter().any(|p| p.trim().is_empty()) {
+                bail!("--re needs a path");
+            }
+            let any = paths
+                .iter()
+                .map(|p| regex::escape(p.trim()))
+                .collect::<Vec<_>>()
+                .join("|");
+            self.replies = Some(Regex::new(&format!(r"(?m)^re:[ \t]*(?:{any})[ \t]*\r?$"))?);
+        }
+        Ok(self)
     }
 
     pub fn wants(&self, body: &str) -> bool {
         self.matches.as_ref().is_none_or(|re| re.is_match(body))
+            && self.replies.as_ref().is_none_or(|re| re.is_match(body))
             && !self.not_match.as_ref().is_some_and(|re| re.is_match(body))
     }
 }
@@ -233,9 +255,13 @@ pub fn finish<T: Serialize>(
     }
 }
 
+/// `s` quoted for a POSIX shell.
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// The filter flags as typed, each quoted for a shell, so a printed restart keeps them.
 pub fn filter_flags(matches: &Option<String>, not_match: &Option<String>) -> String {
-    let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
     let mut flags = String::new();
     if let Some(p) = matches {
         flags.push_str(&format!(" --match {}", quote(p)));
@@ -244,6 +270,14 @@ pub fn filter_flags(matches: &Option<String>, not_match: &Option<String>) -> Str
         flags.push_str(&format!(" --not-match {}", quote(p)));
     }
     flags
+}
+
+/// The --re flags as typed, quoted the same way.
+pub fn reply_flags(paths: &[String]) -> String {
+    paths
+        .iter()
+        .map(|p| format!(" --re {}", quote(p)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -491,5 +525,51 @@ mod tests {
             r" --match '^\S+ to (mac|all)' --not-match 'it'\''s'"
         );
         assert_eq!(filter_flags(&None, &None), "");
+        assert_eq!(
+            reply_flags(&["chan/1.md".into(), "chan/2.md".into()]),
+            " --re 'chan/1.md' --re 'chan/2.md'"
+        );
+        assert_eq!(reply_flags(&[]), "");
+    }
+
+    #[test]
+    fn replying_to_wants_a_re_line_naming_one_of_the_paths() {
+        let paths = ["chan/2026-11-10/163104Z-coordinator-cfbe.md".to_string()];
+        let filter = Filter::default().replying_to(&paths).unwrap();
+        let reply =
+            "from: win\nto: coordinator\nre: chan/2026-11-10/163104Z-coordinator-cfbe.md\n\nok";
+        assert!(filter.wants(reply));
+        // Trailing spaces and a Windows line end still count.
+        assert!(
+            filter.wants("from: win\r\nre: chan/2026-11-10/163104Z-coordinator-cfbe.md \r\n\r\nok")
+        );
+        // Another message, a path that only starts the same, a dot that is not a dot, and the
+        // path anywhere but a re: line do not.
+        assert!(!filter.wants("re: chan/2026-11-10/000000Z-coordinator-0000.md\n"));
+        assert!(!filter.wants("re: chan/2026-11-10/163104Z-coordinator-cfbe.md.old\n"));
+        assert!(!filter.wants("re: chan/2026-11-10/163104Z-coordinator-cfbeXmd\n"));
+        assert!(!filter.wants("see chan/2026-11-10/163104Z-coordinator-cfbe.md\n"));
+
+        // Several paths are alternatives, and --match must still hold.
+        let both = Filter::new(&Some("(?m)^from: win2$".into()), &None)
+            .unwrap()
+            .replying_to(&["a.md".into(), "b.md".into()])
+            .unwrap();
+        assert!(both.wants("from: win2\nre: b.md\n"));
+        assert!(!both.wants("from: win\nre: b.md\n"));
+        // No paths leave the filter as it was, and an empty or blank path is refused.
+        assert!(
+            Filter::default()
+                .replying_to(&[])
+                .unwrap()
+                .wants("anything")
+        );
+        for empty in ["", "  "] {
+            let err = Filter::default()
+                .replying_to(&[empty.into()])
+                .err()
+                .unwrap();
+            assert_eq!(err.to_string(), "--re needs a path");
+        }
     }
 }

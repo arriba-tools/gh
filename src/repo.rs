@@ -10,7 +10,7 @@ use crate::api::{self, Client, Repo, encode_path};
 use crate::cli::{RepoCommand, RepoWatchArgs};
 use crate::context::Ctx;
 use crate::wait::{
-    Filter, LOOKBACK, Outcome, Store, Wait, filter_flags, finish, poll_until, progress,
+    Filter, LOOKBACK, Outcome, Store, Wait, filter_flags, finish, poll_until, progress, reply_flags,
 };
 
 /// The most files GitHub lists when comparing two commits.
@@ -211,7 +211,7 @@ fn watch(ctx: &Ctx, args: &RepoWatchArgs) -> Result<()> {
         timeout: Duration::from_secs(args.timeout * 60),
         offline: Duration::from_secs(args.offline * 60),
     };
-    let filter = Filter::new(&args.matches, &args.not_match)?;
+    let filter = Filter::new(&args.matches, &args.not_match)?.replying_to(&args.re)?;
     let prefix = args.path.as_deref().unwrap_or_default();
     let branch = match &args.branch {
         Some(branch) => branch.clone(),
@@ -266,8 +266,9 @@ fn watch(ctx: &Ctx, args: &RepoWatchArgs) -> Result<()> {
             ctx,
             &format!(
                 "\nOnce these are handled, restart with:\n  gh arriba repo watch -R {repo} \
-                 --branch {branch}{path} --state {key} --ack {}{}",
+                 --branch {branch}{path} --state {key} --ack {}{}{}",
                 last.commit,
+                reply_flags(&args.re),
                 filter_flags(&args.matches, &args.not_match)
             ),
         );
@@ -451,6 +452,7 @@ mod tests {
         let filter = Filter {
             matches: Some(Regex::new(r"(?m)^to:.*\b(mac|all)\b").unwrap()),
             not_match: None,
+            replies: None,
         };
         let mut head = Head::new(&client, &repo(), "main");
         let mut base = Base::Commit("aaa".into());
@@ -480,6 +482,7 @@ mod tests {
         let filter = Filter {
             matches: Some(Regex::new(r"(?m)^to: mac").unwrap()),
             not_match: None,
+            replies: None,
         };
         let mut head = Head::new(&client, &repo(), "main");
         let mut base = Base::Commit("aaa".into());
@@ -522,6 +525,7 @@ mod tests {
             path: Some("chan/".into()),
             matches: None,
             not_match: None,
+            re: Vec::new(),
             state: None,
             ack: None,
             interval: 1,

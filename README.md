@@ -136,10 +136,13 @@ without `--state` reports only what arrives while it waits.
 
 | Command | Description |
 |---------|-------------|
-| `repo watch` | Wait for commits that add or change files on a branch and print the files, under `--path` and filtered by contents with `--match` and `--not-match` |
+| `repo watch` | Wait for commits that add or change files on a branch and print the files, under `--path` and filtered by contents with `--match`, `--not-match` and `--re` |
 
 `repo watch` watches the default branch unless `--branch` names another. It exits with the same
 statuses as `issue watch`, and an unchanged branch costs nothing against the rate limit.
+
+With `--re PATH` it waits only for files with a `re:` line naming `PATH`, the replies to the
+message at that path. Repeat it to wait on replies to several messages.
 
 With `--state KEY` the watch remembers the commit it reached. Printing a file does not acknowledge
 it. Restart with the `--ack` the command printed once the files are handled. Commits that bring
@@ -298,6 +301,12 @@ Wait for a file addressed to this machine to land in a folder of another reposit
 
 ```
 gh arriba repo watch -R owner/inbox --path queue/ --state win2 --match '(?m)^to: win2$'
+```
+
+Wait for the replies to a message that was sent there:
+
+```
+gh arriba repo watch -R owner/inbox --path queue/ --re queue/2026-11-10/163104Z-mac-cfbe.md
 ```
 
 Check which labels exist or fit the PR, then add one by a loose name:
