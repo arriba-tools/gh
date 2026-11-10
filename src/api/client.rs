@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Method;
 use reqwest::blocking::{Client as Http, RequestBuilder, Response};
-use reqwest::header::{CONTENT_TYPE, IF_MODIFIED_SINCE, LAST_MODIFIED, LINK};
+use reqwest::header::{CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LINK};
 use serde_json::{Value, json};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -170,6 +170,32 @@ impl Client {
             last_modified,
             poll_interval,
         })
+    }
+
+    /// A conditional GET keyed on an entity tag: the body is None when the server answers 304 Not
+    /// Modified to `etag`, the tag an earlier call returned. GitHub does not count a 304 against
+    /// the rate limit, so an unchanged resource is free to poll.
+    pub fn get_if_changed(
+        &self,
+        path: &str,
+        etag: Option<&str>,
+    ) -> Result<(Option<Value>, Option<String>)> {
+        let url = self.url(path);
+        let mut req = self.request(Method::GET, &url);
+        if let Some(etag) = etag {
+            req = req.header(IF_NONE_MATCH, etag);
+        }
+        let resp = req.send().with_context(|| format!("GET {path} failed"))?;
+        if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok((None, etag.map(str::to_string)));
+        }
+        let resp = check(resp, &Method::GET, path)?;
+        let tag = resp
+            .headers()
+            .get(ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        Ok((Some(parse_json(resp)?), tag))
     }
 
     /// GET every page of a list endpoint that returns a JSON array.
@@ -514,6 +540,30 @@ mod tests {
         let jobs = client.get_all_in("runs", "jobs").unwrap();
         assert_eq!(jobs[0]["id"], 7);
         assert!(client.get_all_in("runs", "missing").is_err());
+    }
+
+    #[test]
+    fn get_if_changed_sends_the_tag_and_reads_304() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/items")
+            .match_header("if-none-match", Matcher::Missing)
+            .with_header("ETag", "\"abc\"")
+            .with_body("[1]")
+            .create();
+        server
+            .mock("GET", "/items")
+            .match_header("if-none-match", "\"abc\"")
+            .with_status(304)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let (body, tag) = client.get_if_changed("items", None).unwrap();
+        assert_eq!(body, Some(json!([1])));
+        assert_eq!(tag.as_deref(), Some("\"abc\""));
+        // An unchanged resource keeps the tag it was asked with.
+        let (body, tag) = client.get_if_changed("items", tag.as_deref()).unwrap();
+        assert_eq!(body, None);
+        assert_eq!(tag.as_deref(), Some("\"abc\""));
     }
 
     #[test]
