@@ -686,7 +686,7 @@ pub enum IssueCommand {
     /// Wait for new comments on an issue, or for open issues with a label, then print them
     ///
     /// Exits 0 after printing what arrived, 3 when nothing arrived before the timeout, and 4 when
-    /// GitHub could not be reached for five polls in a row. A pull request number works too.
+    /// GitHub stayed out of reach for --offline minutes. A pull request number works too.
     ///
     /// With --state, printing a comment does not acknowledge it. Restart with the --ack the
     /// command printed once the comments are handled, so a caller that stops first sees them
@@ -731,6 +731,11 @@ pub struct IssueWatchArgs {
     /// Minutes to wait before giving up
     #[arg(long, value_name = "MINS", default_value_t = 110)]
     pub timeout: u64,
+
+    /// Minutes GitHub may stay out of reach before the watch gives up, polled meanwhile with a
+    /// pause that doubles from --interval up to 5 minutes
+    #[arg(long, value_name = "MINS", default_value_t = 15)]
+    pub offline: u64,
 }
 
 #[derive(Subcommand)]
@@ -738,7 +743,7 @@ pub enum RepoCommand {
     /// Wait for commits that add or change files on a branch, then print the files
     ///
     /// Exits 0 after printing the files, 3 when nothing arrived before the timeout, and 4 when
-    /// GitHub could not be reached for five polls in a row.
+    /// GitHub stayed out of reach for --offline minutes.
     ///
     /// With --state, printing a file does not acknowledge it. Restart with the --ack the command
     /// printed once the files are handled, so a caller that stops first sees them again.
@@ -778,6 +783,11 @@ pub struct RepoWatchArgs {
     /// Minutes to wait before giving up
     #[arg(long, value_name = "MINS", default_value_t = 110)]
     pub timeout: u64,
+
+    /// Minutes GitHub may stay out of reach before the watch gives up, polled meanwhile with a
+    /// pause that doubles from --interval up to 5 minutes
+    #[arg(long, value_name = "MINS", default_value_t = 15)]
+    pub offline: u64,
 }
 
 #[derive(Subcommand)]
