@@ -248,6 +248,7 @@ fn watch(ctx: &Ctx, args: &IssueWatchArgs) -> Result<()> {
     let wait = Wait {
         interval: Duration::from_secs(args.interval),
         timeout: Duration::from_secs(args.timeout * 60),
+        offline: Duration::from_secs(args.offline * 60),
     };
     let named = args.state.is_some();
 
@@ -372,6 +373,7 @@ mod tests {
         Wait {
             interval: Duration::ZERO,
             timeout: Duration::from_secs(60),
+            offline: Duration::ZERO,
         }
     }
 
@@ -631,6 +633,7 @@ mod tests {
         let once = Wait {
             interval: Duration::from_secs(60),
             timeout: Duration::from_secs(60),
+            offline: Duration::ZERO,
         };
         let again =
             watch_labels(&client, &repo(), &labels, &skip, &mut state, true, &once).unwrap();
@@ -678,6 +681,7 @@ mod tests {
             ack: None,
             interval: 1,
             timeout: 1,
+            offline: 15,
         }
     }
 

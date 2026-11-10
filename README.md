@@ -122,8 +122,10 @@ and GitHub Enterprise Server has no upload endpoint.
 | `issue watch --label <LABEL>` | Wait for open issues with a label and print them, skipping ones that also have `--not-label` |
 
 `issue watch` exits 0 after printing what arrived, 3 when nothing arrived before `--timeout`, and 4
-when GitHub could not be reached for five polls in a row. An unchanged issue costs nothing against
-the rate limit, so the default 15 second interval is safe to leave running.
+when GitHub stayed out of reach for `--offline` minutes (15 by default). While it is out of reach
+the pause between polls doubles from `--interval` up to 5 minutes, and a good poll ends the outage.
+An unchanged issue costs nothing against the rate limit, so the default 15 second interval is safe
+to leave running.
 
 With `--state KEY` the watch remembers what was acknowledged. Printing a comment does not
 acknowledge it. Restart with the `--ack` the command printed once the comments are handled, so a

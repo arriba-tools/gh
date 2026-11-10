@@ -18,8 +18,8 @@ use crate::output;
 const EXIT_TIMED_OUT: i32 = 3;
 /// Exit status when GitHub stayed out of reach.
 const EXIT_UNREACHABLE: i32 = 4;
-/// Consecutive failed polls before the watch gives up.
-const BLIND_AFTER: u32 = 5;
+/// The longest pause between polls while GitHub is out of reach, unless --interval is longer.
+const BACKOFF_CAP: Duration = Duration::from_secs(300);
 /// How far back a named watch looks the first time it runs.
 pub const LOOKBACK: TimeDelta = TimeDelta::hours(24);
 
@@ -95,6 +95,8 @@ impl Filter {
 pub struct Wait {
     pub interval: Duration,
     pub timeout: Duration,
+    /// How long GitHub may stay out of reach before the watch gives up.
+    pub offline: Duration,
 }
 
 /// How a watch ended.
@@ -106,30 +108,86 @@ pub enum Outcome<T> {
     Unreachable(u32, String),
 }
 
+/// The time a watch reads and sleeps on, so tests can pass hours without waiting.
+pub trait Clock {
+    fn now(&self) -> Instant;
+    fn sleep(&mut self, pause: Duration);
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&mut self, pause: Duration) {
+        std::thread::sleep(pause);
+    }
+}
+
+/// The pause after the `fails`-th failed poll in a row: --interval doubled each time, up to
+/// BACKOFF_CAP, or --interval itself when that is longer.
+fn backoff(interval: Duration, fails: u32) -> Duration {
+    let cap = BACKOFF_CAP.max(interval);
+    interval
+        .checked_mul(1 << fails.min(16))
+        .map_or(cap, |pause| pause.min(cap))
+}
+
 /// Poll `look` until it finds something, the timeout passes, or GitHub stays out of reach. An
 /// error on the first poll is returned as it is, since a wrong repository or issue never
-/// recovers. A later one is counted, since a network that drops for a moment does.
-pub fn poll_until<T>(wait: &Wait, mut look: impl FnMut() -> Result<Vec<T>>) -> Result<Outcome<T>> {
-    let deadline = Instant::now() + wait.timeout;
+/// recovers. A later one starts an outage, polled with a growing pause, that ends the watch once
+/// it has lasted `wait.offline`, since a network that drops for a moment comes back.
+pub fn poll_until<T>(wait: &Wait, look: impl FnMut() -> Result<Vec<T>>) -> Result<Outcome<T>> {
+    poll_with(wait, &mut SystemClock, look)
+}
+
+fn poll_with<T>(
+    wait: &Wait,
+    clock: &mut impl Clock,
+    mut look: impl FnMut() -> Result<Vec<T>>,
+) -> Result<Outcome<T>> {
+    let deadline = clock.now() + wait.timeout;
     let mut fails = 0;
+    // When the current outage began, and the last error it gave.
+    let mut outage: Option<(Instant, String)> = None;
     let mut first = true;
     loop {
-        match look() {
+        let pause = match look() {
             Ok(found) if !found.is_empty() => return Ok(Outcome::Found(found)),
-            Ok(_) => fails = 0,
+            Ok(_) => {
+                fails = 0;
+                outage = None;
+                wait.interval
+            }
             Err(e) if first => return Err(e),
             Err(e) => {
                 fails += 1;
-                if fails >= BLIND_AFTER {
-                    return Ok(Outcome::Unreachable(fails, format!("{e:#}")));
+                let error = format!("{e:#}");
+                let since = outage.as_ref().map_or_else(|| clock.now(), |(t, _)| *t);
+                if outage.is_none() {
+                    eprintln!(
+                        "GitHub failed a poll, retrying for up to {}: {error}",
+                        output::duration(wait.offline.as_secs() as i64)
+                    );
                 }
+                if clock.now().duration_since(since) >= wait.offline {
+                    return Ok(Outcome::Unreachable(fails, error));
+                }
+                outage = Some((since, error));
+                backoff(wait.interval, fails)
             }
-        }
+        };
         first = false;
-        if Instant::now() + wait.interval > deadline {
-            return Ok(Outcome::TimedOut);
+        if clock.now() + pause > deadline {
+            // A watch still out of reach at its deadline cannot say that nothing arrived.
+            return Ok(match outage {
+                Some((_, error)) => Outcome::Unreachable(fails, error),
+                None => Outcome::TimedOut,
+            });
         }
-        std::thread::sleep(wait.interval);
+        clock.sleep(pause);
     }
 }
 
@@ -197,11 +255,53 @@ mod tests {
         Wait {
             interval: Duration::ZERO,
             timeout: Duration::from_secs(60),
+            offline: Duration::ZERO,
+        }
+    }
+
+    /// A clock that only moves when the watch sleeps, recording each pause.
+    struct FakeClock {
+        start: Instant,
+        passed: Duration,
+        pauses: Vec<Duration>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                start: Instant::now(),
+                passed: Duration::ZERO,
+                pauses: Vec::new(),
+            }
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now(&self) -> Instant {
+            self.start + self.passed
+        }
+
+        fn sleep(&mut self, pause: Duration) {
+            self.passed += pause;
+            self.pauses.push(pause);
+        }
+    }
+
+    fn secs(s: u64) -> Duration {
+        Duration::from_secs(s)
+    }
+
+    /// Polls every 15 seconds for 110 minutes, out of reach for at most 15.
+    fn watch_like() -> Wait {
+        Wait {
+            interval: secs(15),
+            timeout: secs(110 * 60),
+            offline: secs(15 * 60),
         }
     }
 
     #[test]
-    fn poll_until_finds_times_out_or_goes_blind() {
+    fn poll_until_finds_or_times_out() {
         let mut calls = 0;
         let found = poll_until(&no_wait(), || {
             calls += 1;
@@ -210,23 +310,152 @@ mod tests {
         assert_eq!(found.unwrap(), Outcome::Found(vec![3]));
 
         let once = Wait {
-            interval: Duration::from_secs(60),
+            interval: secs(60),
             timeout: Duration::ZERO,
+            offline: secs(60),
         };
         let quiet = poll_until(&once, || Ok(Vec::<u8>::new()));
         assert_eq!(quiet.unwrap(), Outcome::TimedOut);
+    }
 
-        // Five failures in a row end the watch, and a good poll between them resets the count.
+    #[test]
+    fn backoff_doubles_up_to_the_cap() {
+        let pauses: Vec<u64> = (1..=6).map(|n| backoff(secs(15), n).as_secs()).collect();
+        assert_eq!(pauses, [30, 60, 120, 240, 300, 300]);
+        // An interval longer than the cap is never shortened, and a huge count does not overflow.
+        assert_eq!(backoff(secs(600), 3), secs(600));
+        assert_eq!(backoff(secs(15), u32::MAX), BACKOFF_CAP);
+    }
+
+    thread_local! {
+        /// The fake time, published by SharedClock so a `look` closure can read it.
+        static NOW: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// A FakeClock that also publishes its time to NOW.
+    struct SharedClock(FakeClock);
+
+    impl SharedClock {
+        fn new() -> Self {
+            let clock = Self(FakeClock::new());
+            NOW.with(|now| now.set(Some(clock.0.now())));
+            clock
+        }
+    }
+
+    impl Clock for SharedClock {
+        fn now(&self) -> Instant {
+            self.0.now()
+        }
+
+        fn sleep(&mut self, pause: Duration) {
+            self.0.sleep(pause);
+            NOW.with(|now| now.set(Some(self.0.now())));
+        }
+    }
+
+    /// The fake time since `start`, as SharedClock published it.
+    fn since(start: Instant) -> Duration {
+        NOW.with(|now| now.get().expect("a SharedClock").duration_since(start))
+    }
+
+    #[test]
+    fn an_outage_shorter_than_offline_is_ridden_out() {
+        // Down from the second poll until 14 minutes in, then up with something to report.
+        let mut clock = SharedClock::new();
+        let start = clock.now();
         let mut calls = 0;
-        let blind = poll_until(&no_wait(), || {
+        let outcome = poll_with(&watch_like(), &mut clock, || {
             calls += 1;
             match calls {
-                1 | 4 => Ok(Vec::<u8>::new()),
-                _ => bail!("down"),
+                1 => Ok(vec![]),
+                _ if since(start) < secs(14 * 60) => bail!("dns error"),
+                _ => Ok(vec!["message"]),
             }
         });
-        assert_eq!(blind.unwrap(), Outcome::Unreachable(5, "down".into()));
-        assert_eq!(calls, 9);
+        assert_eq!(outcome.unwrap(), Outcome::Found(vec!["message"]));
+        // The first pause is the interval, then each pause doubles up to the cap.
+        assert_eq!(clock.0.pauses, [15, 30, 60, 120, 240, 300, 300].map(secs));
+    }
+
+    #[test]
+    fn a_long_outage_ends_the_watch_after_offline() {
+        let mut clock = FakeClock::new();
+        let mut calls = 0;
+        let outcome = poll_with(&watch_like(), &mut clock, || {
+            calls += 1;
+            if calls == 1 {
+                Ok(Vec::<u8>::new())
+            } else {
+                bail!("dns error")
+            }
+        });
+        // Polls fail at 15 s, 45 s, 105 s, 225 s, 465 s, 765 s and 1065 s, and the last is the
+        // first one 15 minutes after the outage began.
+        assert_eq!(
+            outcome.unwrap(),
+            Outcome::Unreachable(7, "dns error".into())
+        );
+        let outage: Duration = clock.pauses[1..].iter().sum();
+        assert_eq!(outage, secs(1050));
+    }
+
+    #[test]
+    fn a_good_poll_ends_the_outage() {
+        // Two outages of 12.5 minutes each, with good polls between, so neither reaches 15.
+        // Counted as one outage, they would end the watch at 990 s.
+        let mut clock = SharedClock::new();
+        let start = clock.now();
+        let mut calls = 0;
+        let outcome = poll_with(&watch_like(), &mut clock, || {
+            calls += 1;
+            let t = since(start);
+            if calls == 1 || (t >= secs(600) && t < secs(960)) {
+                Ok(vec![])
+            } else if t < secs(1560) {
+                bail!("dns error")
+            } else {
+                Ok(vec![calls])
+            }
+        });
+        assert!(matches!(outcome.unwrap(), Outcome::Found(_)));
+        assert_eq!(since(start), secs(1710));
+    }
+
+    #[test]
+    fn out_of_reach_at_the_deadline_is_unreachable() {
+        let wait = Wait {
+            interval: secs(15),
+            timeout: secs(5 * 60),
+            offline: secs(15 * 60),
+        };
+        let mut clock = FakeClock::new();
+        let mut calls = 0;
+        let outcome = poll_with(&wait, &mut clock, || {
+            calls += 1;
+            if calls == 1 {
+                Ok(Vec::<u8>::new())
+            } else {
+                bail!("down")
+            }
+        });
+        assert!(matches!(outcome.unwrap(), Outcome::Unreachable(_, e) if e == "down"));
+    }
+
+    #[test]
+    fn offline_zero_gives_up_on_the_first_failed_poll_after_the_first() {
+        let mut clock = FakeClock::new();
+        let mut calls = 0;
+        let outcome = poll_with(&no_wait(), &mut clock, || {
+            calls += 1;
+            if calls == 1 {
+                Ok(Vec::<u8>::new())
+            } else {
+                bail!("down")
+            }
+        });
+        assert_eq!(outcome.unwrap(), Outcome::Unreachable(1, "down".into()));
+        assert_eq!(calls, 2);
     }
 
     #[test]

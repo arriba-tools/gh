@@ -209,6 +209,7 @@ fn watch(ctx: &Ctx, args: &RepoWatchArgs) -> Result<()> {
     let wait = Wait {
         interval: Duration::from_secs(args.interval),
         timeout: Duration::from_secs(args.timeout * 60),
+        offline: Duration::from_secs(args.offline * 60),
     };
     let filter = Filter::new(&args.matches, &args.not_match)?;
     let prefix = args.path.as_deref().unwrap_or_default();
@@ -294,6 +295,7 @@ mod tests {
         Wait {
             interval: Duration::ZERO,
             timeout: Duration::from_secs(60),
+            offline: Duration::ZERO,
         }
     }
 
@@ -301,6 +303,7 @@ mod tests {
         Wait {
             interval: Duration::from_secs(60),
             timeout: Duration::ZERO,
+            offline: Duration::ZERO,
         }
     }
 
@@ -523,6 +526,7 @@ mod tests {
             ack: None,
             interval: 1,
             timeout: 1,
+            offline: 15,
         }
     }
 
