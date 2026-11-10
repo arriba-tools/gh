@@ -275,13 +275,15 @@ impl<'a> Feed<'a> {
             let Value::Array(page) = body else {
                 bail!("Expected a JSON array from {}", self.path);
             };
-            // A full page may have more behind it, so read them all.
-            self.last = if page.len() >= 100 {
-                self.client.get_all(&self.path)?
+            // A full page may have more behind it. Only the first page's tag is known, and a new
+            // item lands on a later page, so a paged list is read whole on every poll.
+            if page.len() >= 100 {
+                self.last = self.client.get_all(&self.path)?;
+                self.etag = None;
             } else {
-                page
-            };
-            self.etag = etag;
+                self.last = page;
+                self.etag = etag;
+            }
         }
         Ok(&self.last)
     }
@@ -331,6 +333,8 @@ fn watch_labels(
         let issues: Vec<Labelled> = feed
             .read()?
             .iter()
+            // The issues endpoint lists pull requests too.
+            .filter(|i| i.get("pull_request").is_none())
             .filter(|i| {
                 let has = |label: &String| {
                     i["labels"]
@@ -723,6 +727,41 @@ mod tests {
     }
 
     #[test]
+    fn a_paged_feed_is_read_whole_on_every_poll() {
+        let mut server = Server::new();
+        let page: Vec<Value> = (1..=100).map(|id| raw(id, "x")).collect();
+        let next = format!(
+            "<{}/repos/o/r/issues/1/comments?page=2>; rel=\"next\"",
+            server.url()
+        );
+        // Each read asks for the first page twice, once to see whether it changed and once to
+        // follow its pages. A stored tag would answer 304 here and hide the second page.
+        let first = server
+            .mock("GET", "/repos/o/r/issues/1/comments")
+            .match_query(Matcher::UrlEncoded("since".into(), "t".into()))
+            .match_header("if-none-match", Matcher::Missing)
+            .with_header("ETag", "\"a\"")
+            .with_header("link", &next)
+            .with_body(Value::Array(page).to_string())
+            .expect(4)
+            .create();
+        let second = server
+            .mock("GET", "/repos/o/r/issues/1/comments")
+            .match_query(Matcher::UrlEncoded("page".into(), "2".into()))
+            .with_body(json!([raw(101, "new")]).to_string())
+            .expect(2)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let path = "repos/o/r/issues/1/comments?per_page=100&since=t".to_string();
+        let mut feed = Feed::new(&client, path);
+        assert_eq!(feed.read().unwrap().len(), 101);
+        assert_eq!(feed.etag, None);
+        assert_eq!(feed.read().unwrap().len(), 101);
+        first.assert();
+        second.assert();
+    }
+
+    #[test]
     fn watch_comments_fails_at_once_on_a_missing_issue() {
         let mut server = Server::new();
         server
@@ -761,7 +800,15 @@ mod tests {
                 Matcher::UrlEncoded("state".into(), "open".into()),
                 Matcher::UrlEncoded("labels".into(), "win 2".into()),
             ]))
-            .with_body(json!([issue(3, &["win 2", "running"]), issue(4, &["win 2"])]).to_string())
+            .with_body(
+                json!([
+                    issue(3, &["win 2", "running"]),
+                    issue(4, &["win 2"]),
+                    {"number": 5, "title": "A pull request", "labels": [{"name": "win 2"}],
+                     "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/5"}}
+                ])
+                .to_string(),
+            )
             .create();
         let client = Client::for_tests(&server.url());
         let labels = ["win 2".to_string()];
@@ -813,6 +860,65 @@ mod tests {
         fs::write(&store.0, "not json").unwrap();
         assert_eq!(store.load(), State::default());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn ctx(server: &mockito::ServerGuard, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn args(number: Option<u64>, label: &[&str]) -> IssueWatchArgs {
+        IssueWatchArgs {
+            number,
+            label: label.iter().map(|l| l.to_string()).collect(),
+            not_label: vec![],
+            matches: None,
+            not_match: None,
+            state: None,
+            ack: None,
+            interval: 1,
+            timeout: 1,
+        }
+    }
+
+    #[test]
+    fn watch_prints_comments_as_text_or_json() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/issues/1/comments")
+            .match_query(Matcher::Any)
+            .with_body(json!([raw(8, "hello")]).to_string())
+            .expect(2)
+            .create();
+        run(
+            &ctx(&server, false),
+            IssueCommand::Watch(args(Some(1), &[])),
+        )
+        .unwrap();
+        run(&ctx(&server, true), IssueCommand::Watch(args(Some(1), &[]))).unwrap();
+    }
+
+    #[test]
+    fn watch_prints_labelled_issues() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/issues")
+            .match_query(Matcher::Any)
+            .with_body(
+                json!([{"number": 4, "title": "Task", "labels": [{"name": "b"}]}]).to_string(),
+            )
+            .expect(2)
+            .create();
+        run(
+            &ctx(&server, false),
+            IssueCommand::Watch(args(None, &["b", "a"])),
+        )
+        .unwrap();
+        run(&ctx(&server, true), IssueCommand::Watch(args(None, &["b"]))).unwrap();
     }
 
     #[test]
