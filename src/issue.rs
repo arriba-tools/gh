@@ -1,29 +1,19 @@
 //! Waits on an issue for new comments, or on a repository for labelled issues, so a script or an
 //! agent can block until something needs it instead of polling by hand.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::api::{Client, Repo, encode_segment};
 use crate::cli::{IssueCommand, IssueWatchArgs};
 use crate::context::Ctx;
-use crate::output;
-
-/// Exit status when nothing arrived before the timeout.
-const EXIT_TIMED_OUT: i32 = 3;
-/// Exit status when GitHub stayed out of reach.
-const EXIT_UNREACHABLE: i32 = 4;
-/// Consecutive failed polls before the watch gives up.
-const BLIND_AFTER: u32 = 5;
-/// How far back a named watch looks the first time it runs.
-const LOOKBACK: TimeDelta = TimeDelta::hours(24);
+use crate::wait::{
+    Filter, LOOKBACK, Outcome, Store, Wait, filter_flags, finish, poll_until, progress,
+};
 
 pub fn run(ctx: &Ctx, cmd: IssueCommand) -> Result<()> {
     match cmd {
@@ -97,72 +87,6 @@ impl State {
     }
 }
 
-/// Where a named watch keeps its [`State`].
-struct Store(PathBuf);
-
-impl Store {
-    /// The file for `key` on `slot` of `repo`, under this user's gh-arriba data directory.
-    fn open(repo: &Repo, slot: &str, key: &str) -> Result<Self> {
-        let dir = crate::notify::data_dir(std::env::consts::OS, |name| {
-            std::env::var_os(name).map(PathBuf::from)
-        })
-        .context("No home directory to keep --state in")?;
-        let name: String = format!("{}__{}__{slot}__{key}", repo.owner, repo.name)
-            .chars()
-            .map(|c| match c {
-                c if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') => c,
-                _ => '_',
-            })
-            .collect();
-        Ok(Self(dir.join("issue-watch").join(format!("{name}.json"))))
-    }
-
-    /// The stored state, or an empty one when the file is missing or unreadable.
-    fn load(&self) -> State {
-        fs::read_to_string(&self.0)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    }
-
-    fn save(&self, state: &State) -> Result<()> {
-        let dir = self.0.parent().context("State file has no directory")?;
-        fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-        // Written beside the file and renamed, so a crash never leaves half a state.
-        let tmp = self.0.with_extension("tmp");
-        fs::write(&tmp, serde_json::to_string(state)?)
-            .with_context(|| format!("Failed to write {}", tmp.display()))?;
-        fs::rename(&tmp, &self.0).with_context(|| format!("Failed to write {}", self.0.display()))
-    }
-}
-
-/// Which comments count.
-#[derive(Default)]
-struct Filter {
-    matches: Option<Regex>,
-    not_match: Option<Regex>,
-}
-
-impl Filter {
-    fn new(args: &IssueWatchArgs) -> Result<Self> {
-        let compile = |pattern: &Option<String>, flag: &str| {
-            pattern
-                .as_deref()
-                .map(|p| Regex::new(p).with_context(|| format!("Invalid {flag} regex {p:?}")))
-                .transpose()
-        };
-        Ok(Self {
-            matches: compile(&args.matches, "--match")?,
-            not_match: compile(&args.not_match, "--not-match")?,
-        })
-    }
-
-    fn wants(&self, body: &str) -> bool {
-        self.matches.as_ref().is_none_or(|re| re.is_match(body))
-            && !self.not_match.as_ref().is_some_and(|re| re.is_match(body))
-    }
-}
-
 /// The comments past the cursor that the filter wants, oldest first.
 fn unread(mut comments: Vec<Comment>, filter: &Filter, acked: u64) -> Vec<Comment> {
     comments.retain(|c| c.id > acked && filter.wants(&c.body));
@@ -204,48 +128,6 @@ fn fresh(
         announced.insert(issue.number, now);
     }
     due
-}
-
-/// How long to poll and how often.
-struct Wait {
-    interval: Duration,
-    timeout: Duration,
-}
-
-/// How a watch ended.
-#[derive(Debug, PartialEq)]
-enum Outcome<T> {
-    Found(Vec<T>),
-    TimedOut,
-    /// GitHub failed this many polls in a row, the last one with this error.
-    Unreachable(u32, String),
-}
-
-/// Poll `look` until it finds something, the timeout passes, or GitHub stays out of reach. An
-/// error on the first poll is returned as it is, since a wrong repository or issue never
-/// recovers. A later one is counted, since a network that drops for a moment does.
-fn poll_until<T>(wait: &Wait, mut look: impl FnMut() -> Result<Vec<T>>) -> Result<Outcome<T>> {
-    let deadline = Instant::now() + wait.timeout;
-    let mut fails = 0;
-    let mut first = true;
-    loop {
-        match look() {
-            Ok(found) if !found.is_empty() => return Ok(Outcome::Found(found)),
-            Ok(_) => fails = 0,
-            Err(e) if first => return Err(e),
-            Err(e) => {
-                fails += 1;
-                if fails >= BLIND_AFTER {
-                    return Ok(Outcome::Unreachable(fails, format!("{e:#}")));
-                }
-            }
-        }
-        first = false;
-        if Instant::now() + wait.interval > deadline {
-            return Ok(Outcome::TimedOut);
-        }
-        std::thread::sleep(wait.interval);
-    }
 }
 
 /// Reads a list endpoint again and again, for free while it has not changed.
@@ -361,48 +243,6 @@ fn watch_labels(
     })
 }
 
-/// Progress goes to stderr under --json so stdout carries only the final document.
-fn progress(ctx: &Ctx, line: &str) {
-    if ctx.json {
-        eprintln!("{line}");
-    } else {
-        println!("{line}");
-    }
-}
-
-/// Report how a watch ended, exiting with the status that tells a caller why.
-fn finish<T: Serialize>(
-    ctx: &Ctx,
-    outcome: Outcome<T>,
-    wait: &Wait,
-    text: impl Fn(&T) -> String,
-) -> Result<Vec<T>> {
-    match outcome {
-        Outcome::Found(found) => {
-            if ctx.json {
-                output::print_json(&found)?;
-            } else {
-                found.iter().for_each(|item| println!("{}", text(item)));
-            }
-            Ok(found)
-        }
-        Outcome::TimedOut => {
-            progress(
-                ctx,
-                &format!(
-                    "Nothing new in {}",
-                    output::duration(wait.timeout.as_secs() as i64)
-                ),
-            );
-            std::process::exit(EXIT_TIMED_OUT);
-        }
-        Outcome::Unreachable(fails, error) => {
-            eprintln!("GitHub failed {fails} polls in a row, the last with: {error}");
-            std::process::exit(EXIT_UNREACHABLE);
-        }
-    }
-}
-
 fn watch(ctx: &Ctx, args: &IssueWatchArgs) -> Result<()> {
     let repo = ctx.repo()?;
     let wait = Wait {
@@ -417,9 +257,16 @@ fn watch(ctx: &Ctx, args: &IssueWatchArgs) -> Result<()> {
         let store = args
             .state
             .as_deref()
-            .map(|key| Store::open(&repo, &format!("label-{}", labels.join("+")), key))
+            .map(|key| {
+                Store::open(
+                    "issue-watch",
+                    &repo,
+                    &format!("label-{}", labels.join("+")),
+                    key,
+                )
+            })
             .transpose()?;
-        let mut state = store.as_ref().map(Store::load).unwrap_or_default();
+        let mut state: State = store.as_ref().map(Store::load).unwrap_or_default();
         progress(
             ctx,
             &format!(
@@ -445,13 +292,13 @@ fn watch(ctx: &Ctx, args: &IssueWatchArgs) -> Result<()> {
         return Ok(());
     };
 
-    let filter = Filter::new(args)?;
+    let filter = Filter::new(&args.matches, &args.not_match)?;
     let store = args
         .state
         .as_deref()
-        .map(|key| Store::open(&repo, &number.to_string(), key))
+        .map(|key| Store::open("issue-watch", &repo, &number.to_string(), key))
         .transpose()?;
-    let mut state = store.as_ref().map(Store::load).unwrap_or_default();
+    let mut state: State = store.as_ref().map(Store::load).unwrap_or_default();
     if let Some(id) = args.ack {
         state.ack(id);
     }
@@ -484,31 +331,20 @@ fn watch(ctx: &Ctx, args: &IssueWatchArgs) -> Result<()> {
             &format!(
                 "\nOnce these are handled, restart with:\n  gh arriba issue watch {number} -R {repo} \
                  --state {key} --ack {last}{}",
-                filter_flags(args)
+                filter_flags(&args.matches, &args.not_match)
             ),
         );
     }
     Ok(())
 }
 
-/// The filter flags as typed, each quoted for a shell, so a printed restart keeps them.
-fn filter_flags(args: &IssueWatchArgs) -> String {
-    let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
-    let mut flags = String::new();
-    if let Some(p) = &args.matches {
-        flags.push_str(&format!(" --match {}", quote(p)));
-    }
-    if let Some(p) = &args.not_match {
-        flags.push_str(&format!(" --not-match {}", quote(p)));
-    }
-    flags
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use mockito::{Matcher, Server};
+    use regex::Regex;
     use serde_json::json;
+    use std::fs;
 
     fn comment(id: u64, body: &str) -> Comment {
         Comment {
@@ -631,46 +467,6 @@ mod tests {
         assert_eq!(fresh(issues, &mut announced, later, window, true).len(), 1);
         // An unnamed watch has no memory, so it reports every time.
         assert_eq!(fresh(issues, &mut announced, later, window, false).len(), 1);
-    }
-
-    #[test]
-    fn poll_until_finds_times_out_or_goes_blind() {
-        let mut calls = 0;
-        let found = poll_until(&no_wait(), || {
-            calls += 1;
-            Ok(if calls < 3 { vec![] } else { vec![calls] })
-        });
-        assert_eq!(found.unwrap(), Outcome::Found(vec![3]));
-
-        let once = Wait {
-            interval: Duration::from_secs(60),
-            timeout: Duration::ZERO,
-        };
-        let quiet = poll_until(&once, || Ok(Vec::<u8>::new()));
-        assert_eq!(quiet.unwrap(), Outcome::TimedOut);
-
-        // Five failures in a row end the watch, and a good poll between them resets the count.
-        let mut calls = 0;
-        let blind = poll_until(&no_wait(), || {
-            calls += 1;
-            match calls {
-                1 | 4 => Ok(Vec::<u8>::new()),
-                _ => bail!("down"),
-            }
-        });
-        assert_eq!(blind.unwrap(), Outcome::Unreachable(5, "down".into()));
-        assert_eq!(calls, 9);
-    }
-
-    #[test]
-    fn an_error_on_the_first_poll_is_final() {
-        let mut calls = 0;
-        let err = poll_until(&no_wait(), || -> Result<Vec<u8>> {
-            calls += 1;
-            bail!("GitHub API 404")
-        });
-        assert_eq!(err.unwrap_err().to_string(), "GitHub API 404");
-        assert_eq!(calls, 1);
     }
 
     #[test]
@@ -845,7 +641,7 @@ mod tests {
     fn state_round_trips_and_survives_a_bad_file() {
         let dir = std::env::temp_dir().join(format!("gh-arriba-issue-{}", std::process::id()));
         let store = Store(dir.join("nested").join("state.json"));
-        assert_eq!(store.load(), State::default());
+        assert_eq!(store.load::<State>(), State::default());
         let mut state = State {
             acked: 9,
             since: Some("2026-01-01T00:00:00Z".into()),
@@ -856,9 +652,9 @@ mod tests {
             .insert(4, "2026-01-02T00:00:00Z".parse().unwrap());
         state.deliver(&[comment(12, "")]);
         store.save(&state).unwrap();
-        assert_eq!(store.load(), state);
+        assert_eq!(store.load::<State>(), state);
         fs::write(&store.0, "not json").unwrap();
-        assert_eq!(store.load(), State::default());
+        assert_eq!(store.load::<State>(), State::default());
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -919,44 +715,5 @@ mod tests {
         )
         .unwrap();
         run(&ctx(&server, true), IssueCommand::Watch(args(None, &["b"]))).unwrap();
-    }
-
-    #[test]
-    fn filter_rejects_a_bad_regex() {
-        let args = IssueWatchArgs {
-            number: Some(1),
-            label: vec![],
-            not_label: vec![],
-            matches: Some("(".into()),
-            not_match: None,
-            state: None,
-            ack: None,
-            interval: 15,
-            timeout: 110,
-        };
-        let err = Filter::new(&args).err().unwrap().to_string();
-        assert_eq!(err, "Invalid --match regex \"(\"");
-    }
-
-    #[test]
-    fn restart_hint_keeps_the_filters() {
-        let mut args = IssueWatchArgs {
-            number: Some(1),
-            label: vec![],
-            not_label: vec![],
-            matches: Some(r"^\S+ to (mac|all)".into()),
-            not_match: Some("it's".into()),
-            state: Some("mac".into()),
-            ack: None,
-            interval: 15,
-            timeout: 110,
-        };
-        assert_eq!(
-            filter_flags(&args),
-            r" --match '^\S+ to (mac|all)' --not-match 'it'\''s'"
-        );
-        args.matches = None;
-        args.not_match = None;
-        assert_eq!(filter_flags(&args), "");
     }
 }
