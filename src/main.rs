@@ -14,6 +14,7 @@ mod parallel;
 mod pr;
 mod prompt;
 mod release;
+mod repo;
 mod run;
 mod runners;
 mod upload;
@@ -53,6 +54,7 @@ fn main() -> Result<()> {
         Command::Run(cmd) => run::run(&ctx()?, cmd),
         Command::Release(args) => release::run(&ctx()?, args),
         Command::Issue(cmd) => issue::run(&ctx()?, cmd),
+        Command::Repo(cmd) => repo::run(&ctx()?, cmd),
         Command::Dependabot(cmd) => dependabot::run(&ctx()?, cmd),
         Command::Runners(args) => runners::run(&ctx()?, args),
         Command::Worktree(cmd) => worktree::run(&ctx()?, cmd),

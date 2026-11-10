@@ -43,6 +43,9 @@ pub enum Command {
     /// Wait on an issue for new comments, or on a repo for labelled issues
     #[command(subcommand)]
     Issue(IssueCommand),
+    /// Wait on a branch for commits that add or change files
+    #[command(subcommand)]
+    Repo(RepoCommand),
     /// Triage Dependabot pull requests and security alerts
     #[command(subcommand)]
     Dependabot(DependabotCommand),
@@ -720,6 +723,53 @@ pub struct IssueWatchArgs {
     /// Acknowledge comments up to this ID before waiting
     #[arg(long, value_name = "ID", requires = "state", conflicts_with = "label")]
     pub ack: Option<u64>,
+
+    /// Seconds between polls
+    #[arg(long, value_name = "SECS", default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
+    pub interval: u64,
+
+    /// Minutes to wait before giving up
+    #[arg(long, value_name = "MINS", default_value_t = 110)]
+    pub timeout: u64,
+}
+
+#[derive(Subcommand)]
+pub enum RepoCommand {
+    /// Wait for commits that add or change files on a branch, then print the files
+    ///
+    /// Exits 0 after printing the files, 3 when nothing arrived before the timeout, and 4 when
+    /// GitHub could not be reached for five polls in a row.
+    ///
+    /// With --state, printing a file does not acknowledge it. Restart with the --ack the command
+    /// printed once the files are handled, so a caller that stops first sees them again.
+    Watch(RepoWatchArgs),
+}
+
+#[derive(Args)]
+pub struct RepoWatchArgs {
+    /// Branch to watch (default: the repo's default branch)
+    #[arg(short, long)]
+    pub branch: Option<String>,
+
+    /// Only files under this path
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Only files whose contents match this regex
+    #[arg(long = "match", value_name = "REGEX")]
+    pub matches: Option<String>,
+
+    /// Skip files whose contents match this regex
+    #[arg(long, value_name = "REGEX")]
+    pub not_match: Option<String>,
+
+    /// Remember progress under this name, so a restart picks up where the last one stopped
+    #[arg(long, value_name = "KEY")]
+    pub state: Option<String>,
+
+    /// Acknowledge every commit up to this one before waiting
+    #[arg(long, value_name = "SHA", requires = "state")]
+    pub ack: Option<String>,
 
     /// Seconds between polls
     #[arg(long, value_name = "SECS", default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
