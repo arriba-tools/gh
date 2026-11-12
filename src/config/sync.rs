@@ -567,6 +567,10 @@ pub fn do_add(
         print_gist_url(id, is_gist_private(client, id)?);
     } else {
         let file_map = build_file_map(config, &manifest);
+        // build_file_map skips unreadable files, which would leave their entries without content.
+        if let Some(e) = added.iter().find(|e| !file_map.contains_key(&e.gist)) {
+            anyhow::bail!("Failed to read {}", e.path);
+        }
         println!("Creating gist: {}", config.gist_description());
         let id = client.create_gist(&config.gist_description(), config.public, &file_map)?;
         for entry in &added {
@@ -1296,6 +1300,26 @@ mod tests {
         )
         .unwrap();
         post.assert();
+    }
+
+    #[test]
+    fn add_refuses_unreadable_files() {
+        let root = Root::new("add-unreadable");
+        let c = root.config();
+        fs::write(root.0.join("bin"), [0xff, 0xfe]).unwrap();
+        let mut server = Server::new();
+        serve_gist(&mut server, gist_json(&c, &[], &[]));
+        let post = server.mock("POST", "/gists").expect(0).create();
+        let patch = server.mock("PATCH", "/gists/g1").expect(0).create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+
+        for gist_id in [None, Some("g1")] {
+            let err = do_add(&gists, &c, &["bin".into()], false, gist_id).unwrap_err();
+            assert_eq!(err.to_string(), "Failed to read bin");
+        }
+        post.assert();
+        patch.assert();
     }
 
     #[test]
