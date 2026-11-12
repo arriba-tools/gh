@@ -529,6 +529,11 @@ pub fn do_add(
                  Run `gh arriba config remove {normalized}` first to change it."
             );
         }
+        // Only track files that have content to upload.
+        if !config.root.join(&normalized).is_file() {
+            println!("  skipped {normalized} (not found locally)");
+            continue;
+        }
 
         let ts = local_mtime(config, &normalized).unwrap_or_else(Utc::now);
         added.push(Manifest::entry(config, &normalized, platform, ts));
@@ -553,14 +558,10 @@ pub fn do_add(
                 .as_deref()
                 .map(|p| format!(" ({p})"))
                 .unwrap_or_default();
-            if full.is_file() {
-                let content = fs::read_to_string(&full)
-                    .with_context(|| format!("Failed to read {}", entry.path))?;
-                updates.insert(entry.gist.clone(), Some(content));
-                println!("  added {}{suffix}", entry.path);
-            } else {
-                println!("  skipped {} (not found locally)", entry.path);
-            }
+            let content = fs::read_to_string(&full)
+                .with_context(|| format!("Failed to read {}", entry.path))?;
+            updates.insert(entry.gist.clone(), Some(content));
+            println!("  added {}{suffix}", entry.path);
         }
         client.update_files(id, &updates)?;
         print_gist_url(id, is_gist_private(client, id)?);
@@ -1178,12 +1179,12 @@ mod tests {
 
         let files = sent_files(&seen);
         let names: Vec<&str> = files.keys().map(String::as_str).collect();
-        // later.txt is tracked but has no content to upload yet.
         assert_eq!(names, vec![".proj-config-sync.yaml", "proj_new.txt"]);
         assert_eq!(files["proj_new.txt"]["content"], "new");
         let manifest = sent_manifest(&c, &files);
         let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, vec!["old.txt", "new.txt", "later.txt"]);
+        // later.txt is missing locally, so it stays out of the manifest.
+        assert_eq!(paths, vec!["old.txt", "new.txt"]);
         assert_eq!(manifest.files[1].updated_at, ts(7));
     }
 
@@ -1238,6 +1239,7 @@ mod tests {
         let gists = GistClient::new(&client);
 
         do_add(&gists, &c, &["a".into()], false, Some("g1")).unwrap();
+        do_add(&gists, &c, &["missing".into()], false, Some("g1")).unwrap();
         let err = do_add(&gists, &c, &["a".into()], true, Some("g1")).unwrap_err();
         assert!(
             err.to_string().contains("different platform scope"),
@@ -1275,6 +1277,25 @@ mod tests {
         let files = sent_files(&seen);
         assert_eq!(files["proj_a.txt"]["content"], "a");
         assert_eq!(sent_manifest(&c, &files).files[0].updated_at, ts(3));
+    }
+
+    #[test]
+    fn add_without_a_gist_skips_missing_files() {
+        let root = Root::new("add-create-missing");
+        let c = root.config();
+        let mut server = Server::new();
+        let post = server.mock("POST", "/gists").expect(0).create();
+        let client = Client::for_tests(&server.url());
+
+        do_add(
+            &GistClient::new(&client),
+            &c,
+            &["missing.txt".into()],
+            false,
+            None,
+        )
+        .unwrap();
+        post.assert();
     }
 
     #[test]
