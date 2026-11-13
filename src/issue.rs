@@ -12,8 +12,9 @@ use crate::api::{Client, Repo, encode_segment};
 use crate::cli::{IssueCommand, IssueWatchArgs};
 use crate::context::Ctx;
 use crate::wait::{
-    Filter, LOOKBACK, Outcome, Store, Wait, filter_flags, finish, poll_until, progress,
+    Filter, LOOKBACK, Outcome, Store, Wait, filter_flags, finish, poll_until, progress, wake_flag,
 };
+use crate::wake;
 
 pub fn run(ctx: &Ctx, cmd: IssueCommand) -> Result<()> {
     match cmd {
@@ -249,6 +250,7 @@ fn watch(ctx: &Ctx, args: &IssueWatchArgs) -> Result<()> {
         interval: Duration::from_secs(args.interval),
         timeout: Duration::from_secs(args.timeout * 60),
         offline: Duration::from_secs(args.offline * 60),
+        wake: wake::resolve(&ctx.client, &repo, args.wake.as_deref())?,
     };
     let named = args.state.is_some();
 
@@ -331,8 +333,9 @@ fn watch(ctx: &Ctx, args: &IssueWatchArgs) -> Result<()> {
             ctx,
             &format!(
                 "\nOnce these are handled, restart with:\n  gh arriba issue watch {number} -R {repo} \
-                 --state {key} --ack {last}{}",
-                filter_flags(&args.matches, &args.not_match)
+                 --state {key} --ack {last}{}{}",
+                filter_flags(&args.matches, &args.not_match),
+                wake_flag(&args.wake)
             ),
         );
     }
@@ -375,6 +378,7 @@ mod tests {
             interval: Duration::ZERO,
             timeout: Duration::from_secs(60),
             offline: Duration::ZERO,
+            wake: None,
         }
     }
 
@@ -635,6 +639,7 @@ mod tests {
             interval: Duration::from_secs(60),
             timeout: Duration::from_secs(60),
             offline: Duration::ZERO,
+            wake: None,
         };
         let again =
             watch_labels(&client, &repo(), &labels, &skip, &mut state, true, &once).unwrap();
@@ -683,6 +688,7 @@ mod tests {
             interval: 1,
             timeout: 1,
             offline: 15,
+            wake: None,
         }
     }
 

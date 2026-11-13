@@ -19,6 +19,7 @@ mod run;
 mod runners;
 mod upload;
 mod wait;
+mod wake;
 mod workflow;
 mod worktree;
 

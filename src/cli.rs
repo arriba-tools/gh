@@ -634,6 +634,12 @@ pub struct WaitArgs {
     #[arg(long, value_name = "MINS", default_value_t = 60)]
     pub timeout: u64,
 
+    /// URL to hold open between polls, polling as soon as it answers, or the name of an Actions
+    /// variable of the repository that holds one. --interval still bounds the time between polls,
+    /// a failing URL leaves the watch polling as before, and an empty value turns it off
+    #[arg(long, value_name = "URL|VARIABLE")]
+    pub wake: Option<String>,
+
     /// Only wait for jobs whose name contains this, ignoring case
     #[arg(long, value_name = "PATTERN")]
     pub job: Option<String>,
@@ -736,6 +742,12 @@ pub struct IssueWatchArgs {
     /// pause that doubles from --interval up to 5 minutes
     #[arg(long, value_name = "MINS", default_value_t = 15)]
     pub offline: u64,
+
+    /// URL to hold open between polls, polling as soon as it answers, or the name of an Actions
+    /// variable of the repository that holds one. --interval still bounds the time between polls,
+    /// a failing URL leaves the watch polling as before, and an empty value turns it off
+    #[arg(long, value_name = "URL|VARIABLE")]
+    pub wake: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -793,6 +805,12 @@ pub struct RepoWatchArgs {
     /// pause that doubles from --interval up to 5 minutes
     #[arg(long, value_name = "MINS", default_value_t = 15)]
     pub offline: u64,
+
+    /// URL to hold open between polls, polling as soon as it answers, or the name of an Actions
+    /// variable of the repository that holds one. --interval still bounds the time between polls,
+    /// a failing URL leaves the watch polling as before, and an empty value turns it off
+    #[arg(long, value_name = "URL|VARIABLE")]
+    pub wake: Option<String>,
 }
 
 #[derive(Subcommand)]

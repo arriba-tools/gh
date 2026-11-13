@@ -16,7 +16,7 @@ use crate::api::{self, Repo, is_failed};
 use crate::cli::{DispatchArgs, LogsArgs, RunCommand, WatchArgs};
 use crate::context::{Ctx, git};
 use crate::log::{self, Excerpt};
-use crate::{output, parallel, workflow};
+use crate::{output, parallel, wake, workflow};
 
 pub fn run(ctx: &Ctx, cmd: RunCommand) -> Result<()> {
     match cmd {
@@ -265,7 +265,7 @@ fn has_saved_copy(path: &Path) -> bool {
 }
 
 fn watch_runs(ctx: &Ctx, args: WatchArgs) -> Result<()> {
-    let wait: watch::Wait = (&args.wait).into();
+    let mut wait: watch::Wait = (&args.wait).into();
     let runs = if args.runs.is_empty() {
         let repo = ctx.repo()?;
         let commit = match (&args.sha, &args.branch) {
@@ -283,6 +283,9 @@ fn watch_runs(ctx: &Ctx, args: WatchArgs) -> Result<()> {
             .map(|r| resolve_run(ctx, r))
             .collect::<Result<Vec<_>>>()?
     };
+    if let Some((repo, _)) = runs.first() {
+        wait.wake = wake::resolve(&ctx.client, repo, args.wait.wake.as_deref())?;
+    }
     watch::watch_and_report(ctx, &runs, &wait)
 }
 
@@ -446,7 +449,9 @@ fn dispatch(ctx: &Ctx, args: DispatchArgs) -> Result<()> {
     // The watch summary is the JSON document, so the dispatch line goes with the progress.
     watch::progress(ctx, &line);
     let run = run.context("Can't watch, the dispatched run did not appear in time")?;
-    watch::watch_and_report(ctx, &[(repo, run.id)], &(&args.wait).into())
+    let mut wait: watch::Wait = (&args.wait).into();
+    wait.wake = wake::resolve(&ctx.client, &repo, args.wait.wake.as_deref())?;
+    watch::watch_and_report(ctx, &[(repo, run.id)], &wait)
 }
 
 #[cfg(test)]
@@ -586,6 +591,7 @@ mod tests {
             timeout: 1,
             job: None,
             notify: false,
+            wake: None,
         }
     }
 

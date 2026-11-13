@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::api::Repo;
 use crate::context::Ctx;
 use crate::output;
+use crate::wake::Wake;
 
 /// Exit status when nothing arrived before the timeout.
 const EXIT_TIMED_OUT: i32 = 3;
@@ -119,6 +120,8 @@ pub struct Wait {
     pub timeout: Duration,
     /// How long GitHub may stay out of reach before the watch gives up.
     pub offline: Duration,
+    /// Ends the pause after a quiet poll early, when given.
+    pub wake: Option<Wake>,
 }
 
 /// How a watch ended.
@@ -176,12 +179,12 @@ fn poll_with<T>(
     let mut outage: Option<(Instant, String)> = None;
     let mut first = true;
     loop {
-        let pause = match look() {
+        let (pause, quiet) = match look() {
             Ok(found) if !found.is_empty() => return Ok(Outcome::Found(found)),
             Ok(_) => {
                 fails = 0;
                 outage = None;
-                wait.interval
+                (wait.interval, true)
             }
             Err(e) if first => return Err(e),
             Err(e) => {
@@ -198,7 +201,7 @@ fn poll_with<T>(
                     return Ok(Outcome::Unreachable(fails, error));
                 }
                 outage = Some((since, error));
-                backoff(wait.interval, fails)
+                (backoff(wait.interval, fails), false)
             }
         };
         first = false;
@@ -209,7 +212,19 @@ fn poll_with<T>(
                 None => Outcome::TimedOut,
             });
         }
-        clock.sleep(pause);
+        match &wait.wake {
+            // An outage keeps its backoff, since an answer cannot bring GitHub back.
+            Some(wake) if quiet => wake.pause(&mut *clock, pause),
+            _ => clock.sleep(pause),
+        }
+    }
+}
+
+/// Sleep `pause`, ended early by `wake` when given, for loops that poll without `poll_until`.
+pub fn rest(wake: Option<&Wake>, pause: Duration) {
+    match wake {
+        Some(wake) => wake.pause(&mut SystemClock, pause),
+        None => std::thread::sleep(pause),
     }
 }
 
@@ -272,6 +287,15 @@ pub fn filter_flags(matches: &Option<String>, not_match: &Option<String>) -> Str
     flags
 }
 
+/// The --wake flag as typed, quoted the same way, or nothing when it is empty.
+pub fn wake_flag(value: &Option<String>) -> String {
+    value
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| format!(" --wake {}", quote(v)))
+        .unwrap_or_default()
+}
+
 /// The --re flags as typed, quoted the same way.
 pub fn reply_flags(paths: &[String]) -> String {
     paths
@@ -283,6 +307,8 @@ pub fn reply_flags(paths: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wake::Woke;
+    use crate::wake::tests::Scripted;
     use anyhow::bail;
 
     fn no_wait() -> Wait {
@@ -290,6 +316,7 @@ mod tests {
             interval: Duration::ZERO,
             timeout: Duration::from_secs(60),
             offline: Duration::ZERO,
+            wake: None,
         }
     }
 
@@ -331,6 +358,7 @@ mod tests {
             interval: secs(15),
             timeout: secs(110 * 60),
             offline: secs(15 * 60),
+            wake: None,
         }
     }
 
@@ -347,6 +375,7 @@ mod tests {
             interval: secs(60),
             timeout: Duration::ZERO,
             offline: secs(60),
+            wake: None,
         };
         let quiet = poll_until(&once, || Ok(Vec::<u8>::new()));
         assert_eq!(quiet.unwrap(), Outcome::TimedOut);
@@ -462,6 +491,7 @@ mod tests {
             interval: secs(15),
             timeout: secs(5 * 60),
             offline: secs(15 * 60),
+            wake: None,
         };
         let mut clock = FakeClock::new();
         let mut calls = 0;
@@ -490,6 +520,49 @@ mod tests {
         });
         assert_eq!(outcome.unwrap(), Outcome::Unreachable(1, "down".into()));
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn a_wake_ends_the_pause_after_a_quiet_poll() {
+        let (wake, calls) = Scripted::wake(vec![(secs(2), Woke::Early)]);
+        let wait = Wait {
+            wake: Some(wake),
+            ..watch_like()
+        };
+        let mut clock = FakeClock::new();
+        let mut polls = 0;
+        let outcome = poll_with(&wait, &mut clock, || {
+            polls += 1;
+            Ok(if polls < 3 { vec![] } else { vec![polls] })
+        });
+        assert_eq!(outcome.unwrap(), Outcome::Found(vec![3]));
+        // The answer after 2 s ends the first pause, and the second runs to the interval.
+        assert_eq!(clock.pauses, [secs(2), secs(15)]);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn an_outage_backs_off_without_the_wake() {
+        let (wake, calls) = Scripted::wake(vec![]);
+        let wait = Wait {
+            wake: Some(wake),
+            ..watch_like()
+        };
+        let mut clock = SharedClock::new();
+        let start = clock.now();
+        let mut polls = 0;
+        let outcome = poll_with(&wait, &mut clock, || {
+            polls += 1;
+            match polls {
+                1 => Ok(vec![]),
+                _ if since(start) < secs(100) => bail!("dns error"),
+                _ => Ok(vec![polls]),
+            }
+        });
+        assert_eq!(outcome.unwrap(), Outcome::Found(vec![4]));
+        // Only the pause after the quiet poll waits on the wake.
+        assert_eq!(clock.0.pauses, [15, 30, 60].map(secs));
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]
@@ -530,6 +603,9 @@ mod tests {
             " --re 'chan/1.md' --re 'chan/2.md'"
         );
         assert_eq!(reply_flags(&[]), "");
+        assert_eq!(wake_flag(&Some("WAKE_URL".into())), " --wake 'WAKE_URL'");
+        assert_eq!(wake_flag(&Some(" ".into())), "");
+        assert_eq!(wake_flag(&None), "");
     }
 
     #[test]

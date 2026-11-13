@@ -150,6 +150,14 @@ nothing wanted are passed over without an acknowledgement. The first run under a
 newest commit at least 24 hours old, and a watch without `--state` reports only what arrives while
 it waits. GitHub lists at most 300 changed files between two commits.
 
+`issue watch`, `repo watch` and `run watch` take `--wake`, a URL the watch holds open between polls
+and polls as soon as it answers. A long poll that a webhook ends, such as an Upstash Redis
+`XREAD BLOCK` on a stream that a push webhook fills, wakes the watch within seconds, while
+`--interval` still bounds the time between polls. Name an Actions variable of the repository in
+place of the URL to keep a token off the command line and out of each machine's setup. A failing
+URL leaves the watch polling as before, and one that answers at once three times in a row is
+dropped for the rest of the watch.
+
 ### Dependabot
 
 | Command | Description |
@@ -307,6 +315,16 @@ Wait for the replies to a message that was sent there:
 
 ```
 gh arriba repo watch -R owner/inbox --path queue/ --re queue/2026-11-10/163104Z-mac-cfbe.md
+```
+
+Wake on each push instead of the next poll. A push webhook on the repository posting to
+`https://<db>.upstash.io/xadd/inbox/MAXLEN/~/1000/*/push?_token=<token>` fills a stream, and the
+watch holds a read on it that answers just before the 15 second `--interval`:
+
+```
+gh variable set WAKE_URL -R owner/inbox \
+  --body 'https://<db>.upstash.io/xread/block/14000/streams/inbox/$?_token=<read-only token>'
+gh arriba repo watch -R owner/inbox --path queue/ --state win2 --match '(?m)^to: win2$' --wake WAKE_URL
 ```
 
 Check which labels exist or fit the PR, then add one by a loose name:

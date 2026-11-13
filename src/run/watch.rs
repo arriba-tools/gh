@@ -9,6 +9,7 @@ use crate::api::{Repo, is_failed};
 use crate::context::Ctx;
 use crate::notify::{self, Note};
 use crate::output;
+use crate::wake::Wake;
 
 /// How often to poll, how long to keep at it, and which jobs to wait for.
 pub struct Wait {
@@ -18,6 +19,8 @@ pub struct Wait {
     pub job: Option<String>,
     /// Show a desktop notification when the wait ends.
     pub notify: bool,
+    /// Ends the pause between polls early, when given.
+    pub wake: Option<Wake>,
 }
 
 impl From<&crate::cli::WaitArgs> for Wait {
@@ -27,6 +30,8 @@ impl From<&crate::cli::WaitArgs> for Wait {
             timeout: Duration::from_secs(args.timeout * 60),
             job: args.job.as_ref().map(|j| j.to_lowercase()),
             notify: args.notify,
+            // Resolved by the caller, which knows the repository of the runs.
+            wake: None,
         }
     }
 }
@@ -39,6 +44,7 @@ impl Default for Wait {
             timeout: Duration::from_secs(60 * 60),
             job: None,
             notify: false,
+            wake: None,
         }
     }
 }
@@ -224,7 +230,7 @@ pub fn watch(ctx: &Ctx, runs: &[(Repo, u64)], wait: &Wait) -> Result<Vec<RunStat
                 pending.join(", ")
             );
         }
-        std::thread::sleep(wait.interval);
+        crate::wait::rest(wait.wake.as_ref(), wait.interval);
     }
     let states: Vec<RunState> = states.into_iter().flatten().collect();
     if let Some(pattern) = &wait.job
@@ -405,6 +411,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             job: Some("export".to_string()),
             notify: false,
+            wake: None,
         };
         assert!(wait.wants("Export Check (gcc)"));
         assert!(!wait.wants("Ubuntu"));
@@ -477,6 +484,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             job: job.map(str::to_string),
             notify: false,
+            wake: None,
         }
     }
 
@@ -487,8 +495,11 @@ mod tests {
             timeout: 2,
             job: Some("Export".to_string()),
             notify: true,
+            wake: Some("WAKE_URL".to_string()),
         })
             .into();
+        // The caller resolves the wake, since only it knows the repository.
+        assert!(wait.wake.is_none());
         assert_eq!(wait.interval, Duration::from_secs(5));
         assert_eq!(wait.timeout, Duration::from_secs(120));
         assert_eq!(wait.job.as_deref(), Some("export"));
@@ -543,6 +554,7 @@ mod tests {
             timeout: Duration::ZERO,
             job: None,
             notify: false,
+            wake: None,
         };
         let err = watch(&ctx, &[(Repo::parse("o/r").unwrap(), 9)], &wait)
             .unwrap_err()

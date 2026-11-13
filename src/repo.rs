@@ -10,8 +10,10 @@ use crate::api::{self, Client, Repo, encode_path};
 use crate::cli::{RepoCommand, RepoWatchArgs};
 use crate::context::Ctx;
 use crate::wait::{
-    Filter, LOOKBACK, Outcome, Store, Wait, filter_flags, finish, poll_until, progress, reply_flags,
+    Filter, LOOKBACK, Outcome, Store, Wait, filter_flags, finish, poll_until, progress,
+    reply_flags, wake_flag,
 };
+use crate::wake;
 
 /// The most files GitHub lists when comparing two commits.
 const COMPARE_LIMIT: usize = 300;
@@ -210,6 +212,7 @@ fn watch(ctx: &Ctx, args: &RepoWatchArgs) -> Result<()> {
         interval: Duration::from_secs(args.interval),
         timeout: Duration::from_secs(args.timeout * 60),
         offline: Duration::from_secs(args.offline * 60),
+        wake: wake::resolve(client, &repo, args.wake.as_deref())?,
     };
     let filter = Filter::new(&args.matches, &args.not_match)?.replying_to(&args.re)?;
     let prefix = args.path.as_deref().unwrap_or_default();
@@ -266,10 +269,11 @@ fn watch(ctx: &Ctx, args: &RepoWatchArgs) -> Result<()> {
             ctx,
             &format!(
                 "\nOnce these are handled, restart with:\n  gh arriba repo watch -R {repo} \
-                 --branch {branch}{path} --state {key} --ack {}{}{}",
+                 --branch {branch}{path} --state {key} --ack {}{}{}{}",
                 last.commit,
                 reply_flags(&args.re),
-                filter_flags(&args.matches, &args.not_match)
+                filter_flags(&args.matches, &args.not_match),
+                wake_flag(&args.wake)
             ),
         );
     }
@@ -297,6 +301,7 @@ mod tests {
             interval: Duration::ZERO,
             timeout: Duration::from_secs(60),
             offline: Duration::ZERO,
+            wake: None,
         }
     }
 
@@ -305,6 +310,7 @@ mod tests {
             interval: Duration::from_secs(60),
             timeout: Duration::ZERO,
             offline: Duration::ZERO,
+            wake: None,
         }
     }
 
@@ -531,6 +537,7 @@ mod tests {
             interval: 1,
             timeout: 1,
             offline: 15,
+            wake: None,
         }
     }
 
