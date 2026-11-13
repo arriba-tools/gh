@@ -17,6 +17,7 @@ mod release;
 mod repo;
 mod run;
 mod runners;
+mod startup;
 mod upload;
 mod wait;
 mod workflow;

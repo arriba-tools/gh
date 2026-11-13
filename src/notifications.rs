@@ -11,9 +11,17 @@ use crate::cli::{NotifyArgs, NotifyCommand, NotifySendArgs, NotifyWatchArgs};
 use crate::context::{self, Ctx};
 use crate::focus;
 use crate::notify::{self, Note};
+use crate::startup::{self, Service};
 
 mod agents;
-mod startup;
+
+/// The inbox watch, as it starts at login.
+const SERVICE: Service = Service {
+    label: "com.github.nmoinvaz.gh-arriba.notify-watch",
+    unit: "gh-arriba-notify-watch.service",
+    log: "gh-arriba-notify-watch.log",
+    description: "gh arriba notify watch",
+};
 
 /// `ctx` connects to GitHub, so only the commands that need it build one. `yes` answers prompts
 /// for those that do not.
@@ -21,12 +29,15 @@ pub fn run(ctx: impl FnOnce() -> Result<Ctx>, yes: bool, args: NotifyArgs) -> Re
     match args.command {
         // Building the context first fails without a token, before a watch that cannot poll is set up.
         Some(NotifyCommand::Watch(watch_args)) if watch_args.install => {
-            startup::install(&ctx()?, &watch_args)?;
+            let ctx = ctx()?;
+            startup::install(&SERVICE, |exe| {
+                watch_argv(exe, &watch_args, ctx.repo_flag.as_deref(), ctx.json)
+            })?;
             agents::offer_add(yes);
             Ok(())
         }
         Some(NotifyCommand::Watch(watch_args)) if watch_args.uninstall => {
-            if !startup::uninstall()? {
+            if !startup::uninstall(&SERVICE)? {
                 println!("No watch was set to start at login");
             }
             agents::offer_remove(yes);
@@ -50,6 +61,30 @@ pub fn run(ctx: impl FnOnce() -> Result<Ctx>, yes: bool, args: NotifyArgs) -> Re
             Ok(())
         }
     }
+}
+
+/// The command line the service runs: this executable and the watch options given now.
+fn watch_argv(exe: &Path, args: &NotifyWatchArgs, repo: Option<&str>, json: bool) -> Vec<String> {
+    let mut argv: Vec<String> = vec![
+        exe.to_string_lossy().into_owned(),
+        "notify".into(),
+        "watch".into(),
+        "--interval".into(),
+        args.interval.to_string(),
+    ];
+    for reason in &args.reason {
+        argv.extend(["--reason".into(), reason.clone()]);
+    }
+    if args.participating {
+        argv.push("--participating".into());
+    }
+    if let Some(repo) = repo {
+        argv.extend(["-R".into(), repo.into()]);
+    }
+    if json {
+        argv.push("--json".into());
+    }
+    argv
 }
 
 /// The JSON a Claude Code or Codex hook gets on stdin, as far as a notification needs it.
@@ -293,6 +328,40 @@ mod tests {
             install: false,
             uninstall: false,
         }
+    }
+
+    #[test]
+    fn the_service_runs_the_watch_with_the_options_given_at_install() {
+        let exe = Path::new("/x/gh-arriba");
+        let given = NotifyWatchArgs {
+            interval: 90,
+            reason: vec!["mention".into(), "review_requested".into()],
+            participating: true,
+            install: true,
+            ..args()
+        };
+        assert_eq!(
+            watch_argv(exe, &given, Some("o/r"), true),
+            [
+                "/x/gh-arriba",
+                "notify",
+                "watch",
+                "--interval",
+                "90",
+                "--reason",
+                "mention",
+                "--reason",
+                "review_requested",
+                "--participating",
+                "-R",
+                "o/r",
+                "--json",
+            ]
+        );
+        assert_eq!(
+            watch_argv(exe, &args(), None, false),
+            ["/x/gh-arriba", "notify", "watch", "--interval", "60"]
+        );
     }
 
     fn send_args(message: &str) -> NotifySendArgs {
