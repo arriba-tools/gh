@@ -246,25 +246,7 @@ pub fn do_sync(
     }
 
     // Pull first so a failed push doesn't leave local out of date.
-    if !pull_indices.is_empty() {
-        let gist = client.get_gist(id)?;
-        for idx in &pull_indices {
-            let entry = &manifest.files[*idx];
-            let Some(content) = gist.file_content(&entry.gist) else {
-                eprintln!("  warning: {} not found in gist", entry.gist);
-                continue;
-            };
-            let target = config.root.join(&entry.path);
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create directory for {}", entry.path))?;
-            }
-            fs::write(&target, format!("{content}\n"))
-                .with_context(|| format!("Failed to write {}", entry.path))?;
-            set_local_mtime(&target, entry.updated_at)?;
-            println!("  pulled {} -> {}", entry.gist, entry.path);
-        }
-    }
+    pull_files(client, id, config, &manifest, &pull_indices)?;
 
     if !push_indices.is_empty() {
         let push_paths: Vec<String> = push_indices
@@ -298,6 +280,77 @@ pub fn do_sync(
     );
     print_gist_url(id, is_gist_private(client, id)?);
 
+    Ok(())
+}
+
+/// Pull the files the gist has newer, and leave the files newer locally unpushed.
+pub fn do_pull(
+    client: &GistClient,
+    config: &ProjectConfig,
+    arg_files: &[String],
+    gist_id: Option<&str>,
+) -> Result<()> {
+    let id = gist_id.context("No gist found for this project")?;
+    let manifest = read_manifest(client, id, config)?.context("No manifest found in gist")?;
+    let focus = parse_focus(config, &manifest, arg_files)?;
+
+    let mut pull_indices: Vec<usize> = Vec::new();
+    let mut kept = 0usize;
+    let mut in_sync = 0usize;
+    for (idx, action) in build_plan(config, &manifest, &focus) {
+        match action {
+            Action::Pull => pull_indices.push(idx),
+            Action::Push(_) => {
+                println!(
+                    "  kept {} (newer locally, not pushed)",
+                    manifest.files[idx].path
+                );
+                kept += 1;
+            }
+            Action::InSync => in_sync += 1,
+        }
+    }
+
+    pull_files(client, id, config, &manifest, &pull_indices)?;
+
+    println!(
+        "Summary: {} pulled, {kept} newer locally and not pushed, {in_sync} already in sync",
+        pull_indices.len()
+    );
+    print_gist_url(id, is_gist_private(client, id)?);
+
+    Ok(())
+}
+
+/// Write the gist content of each manifest entry at `indices` to its local path, stamped with the
+/// manifest's time.
+fn pull_files(
+    client: &GistClient,
+    id: &str,
+    config: &ProjectConfig,
+    manifest: &Manifest,
+    indices: &[usize],
+) -> Result<()> {
+    if indices.is_empty() {
+        return Ok(());
+    }
+    let gist = client.get_gist(id)?;
+    for idx in indices {
+        let entry = &manifest.files[*idx];
+        let Some(content) = gist.file_content(&entry.gist) else {
+            eprintln!("  warning: {} not found in gist", entry.gist);
+            continue;
+        };
+        let target = config.root.join(&entry.path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory for {}", entry.path))?;
+        }
+        fs::write(&target, format!("{content}\n"))
+            .with_context(|| format!("Failed to write {}", entry.path))?;
+        set_local_mtime(&target, entry.updated_at)?;
+        println!("  pulled {} -> {}", entry.gist, entry.path);
+    }
     Ok(())
 }
 
@@ -948,6 +1001,47 @@ mod tests {
             ]
         );
         assert_eq!(manifest.files[4].platform.as_deref(), Some(OTHER_OS));
+    }
+
+    #[test]
+    fn pull_takes_what_the_gist_has_newer_and_pushes_nothing() {
+        let root = Root::new("pull");
+        let c = root.config();
+        root.write("push.txt", "local push", Some(ts(100)));
+        root.write("pull.txt", "stale local", Some(ts(-100)));
+        let entries = [
+            entry(&c, "push.txt", None, 0),
+            entry(&c, "pull.txt", None, 0),
+            entry(&c, "missing.txt", None, 0),
+        ];
+        let mut server = Server::new();
+        serve_gist(
+            &mut server,
+            gist_json(
+                &c,
+                &entries,
+                &[
+                    ("proj_push.txt", "remote push"),
+                    ("proj_pull.txt", "remote pull"),
+                    ("proj_missing.txt", "remote missing"),
+                ],
+            ),
+        );
+        let patch = server.mock("PATCH", "/gists/g1").expect(0).create();
+        let client = Client::for_tests(&server.url());
+
+        do_pull(&GistClient::new(&client), &c, &[], Some("g1")).unwrap();
+        patch.assert();
+
+        assert_eq!(root.read("pull.txt").as_deref(), Some("remote pull\n"));
+        assert_eq!(root.mtime("pull.txt"), Some(ts(0)));
+        assert_eq!(
+            root.read("missing.txt").as_deref(),
+            Some("remote missing\n")
+        );
+        // A file newer locally keeps its content and time.
+        assert_eq!(root.read("push.txt").as_deref(), Some("local push"));
+        assert_eq!(root.mtime("push.txt"), Some(ts(100)));
     }
 
     #[test]
