@@ -5,7 +5,7 @@
 [![codecov](https://codecov.io/gh/arriba-tools/gh-arriba/graph/badge.svg)](https://codecov.io/gh/arriba-tools/gh-arriba)
 
 A GitHub CLI extension for the chores `gh` doesn't cover: review threads, pending reviews,
-CI retries, signed rebases, releases, Dependabot, and project config sync.
+CI retries, signed rebases, releases, and Dependabot.
 
 Every command takes `--json`, and every prompt has a flag that answers it, so scripts and coding
 agents can drive the same workflows a person runs by hand.
@@ -25,17 +25,8 @@ agents can drive the same workflows a person runs by hand.
   - [Worktrees](#worktrees)
   - [Notifications](#notifications)
   - [Inbox](#inbox)
-  - [Config sync](#config-sync)
   - [Options](#options)
 - [Examples](#examples)
-- [Config sync](#config-sync-1)
-  - [First machine](#first-machine)
-  - [Every other machine](#every-other-machine)
-  - [Which side wins](#which-side-wins)
-  - [Platform-specific files](#platform-specific-files)
-  - [Options](#options-1)
-  - [Safety](#safety)
-  - [Gist layout](#gist-layout)
 - [Authentication](#authentication)
 - [Development](#development)
 - [License](#license)
@@ -233,22 +224,6 @@ background, which Codex supports from 0.148.0, as earlier releases skip them.
 
 Marking a thread done moves it to the Done tab without unsubscribing, and new activity brings it
 back. Pass `-R owner/repo` to clean one repo's threads.
-
-### Config sync
-
-| Command | Description |
-|---------|-------------|
-| `config [sync] [files]` | Push or pull each tracked file, whichever side is newer (default) |
-| `config pull [files]` | Pull each tracked file the gist has newer, without pushing anything |
-| `config status [files]` | Show what sync would push or pull, without changing anything |
-| `config add [--platform] <files>` | Track files and push them, creating the gist on first use |
-| `config remove [--platform] <files>` | Stop tracking files and delete them from the gist |
-| `config restore [files]` | Overwrite local files with the gist versions |
-| `config cleanup` | Delete gist files the manifest no longer lists |
-| `config open` | Open the project's gist in a web browser |
-| `config delete` | Delete the project's gist, after confirming |
-
-See [Config sync](#config-sync-1) for how it works.
 
 ### Options
 
@@ -478,84 +453,6 @@ Hear when a long build or test run ends, even from another window:
 ```
 make test; gh arriba notify "tests done"
 ```
-
-## Config sync
-
-`config` keeps per-project files that you don't commit, such as `.vscode/settings.json` or
-`.claude/CLAUDE.md`, in sync across machines. Each project gets one GitHub gist that holds the
-files plus a manifest listing them.
-
-### First machine
-
-Track the files from anywhere inside the project:
-
-```
-gh arriba config add --private .vscode/settings.json .claude/CLAUDE.md
-```
-
-This creates the gist and pushes the files. Gists are public unless you pass `--private`, and the
-flag only matters here, when the gist is created.
-
-### Every other machine
-
-Run `config` with no arguments inside the same project:
-
-```
-gh arriba config
-```
-
-It reads the manifest from the gist, pulls every tracked file, and pushes any you changed locally.
-Run it again whenever you edit a tracked file. To track another file later, run `config add` again
-from any machine.
-
-### Which side wins
-
-Sync works per file and never merges. It compares each file's local modification time with the time
-the manifest recorded for it.
-
-| Local file | Sync |
-|------------|------|
-| Newer than the manifest | Pushes it to the gist |
-| Older than the manifest | Pulls the gist version |
-| Missing | Pulls the gist version |
-| Within a second of the manifest | Leaves it alone |
-
-Edit a file on one machine at a time, since the newer copy overwrites the other. Run `config status`
-first to see what would happen, or `config restore` to take the gist version regardless.
-`config pull` takes only the pull half of sync, so a machine that only receives changes leaves the
-gist alone, and its own newer files stay as they are.
-
-### Platform-specific files
-
-Add a file with `--platform` when it only applies to the current OS, such as a toolchain path:
-
-```
-gh arriba config add --platform .vscode/cmake-variants.yaml
-```
-
-Run the same command on each OS and each keeps its own copy of that path in the gist. Sync only
-touches the copy for the OS it runs on, `macos`, `linux`, or `windows`.
-
-### Options
-
-| Option | Description |
-|--------|-------------|
-| `--name <NAME>` | Gist name prefix (default: basename of the project root) |
-| `--root <DIR>` | Directory that file paths are relative to (default: git root, or the current directory) |
-| `--private` | Create the gist as secret instead of public |
-
-### Safety
-
-- Before pushing, `config` scans files for potential secrets such as API keys, tokens, and
-  passwords, and aborts if it finds any.
-- `config delete` asks for confirmation, or takes `--yes`.
-
-### Gist layout
-
-The gist's description is `"<project> config-sync"`, which is how `config` finds it again. Each file
-is stored under a flat name with underscores for path separators, as in
-`zlib-ng_.vscode_settings.json`, and platform-specific files tag the OS before the extension, as in
-`zlib-ng_.vscode_settings[macos].json`. The manifest is `.<project>-config-sync.yaml`.
 
 ## Authentication
 
