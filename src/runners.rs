@@ -1,16 +1,21 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashSet};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::sync::Mutex;
 
-use crate::api::actions::{self, OrgRepo};
+use crate::api::actions::{self, OrgRepo, WorkflowRun};
 use crate::api::{Client, Repo};
-use crate::cli::RunnersArgs;
+use crate::cli::{RunnersArgs, RunnersCommand};
 use crate::context::Ctx;
 use crate::dependabot::Scope;
 use crate::output::table;
 use crate::{output, parallel};
+
+mod watch;
 
 /// A self-hosted runner as the runners API reports it.
 #[derive(Debug, PartialEq, Serialize)]
@@ -117,17 +122,132 @@ fn job_of(j: actions::Job, repo: &Repo, workflow: &str) -> Job {
     }
 }
 
+/// Bodies of earlier GETs with their entity tags, so reading an unchanged listing again costs a
+/// 304, which GitHub does not count against the rate limit.
+#[derive(Default)]
+struct Cache {
+    entries: Mutex<HashMap<String, (String, Value)>>,
+    /// Paths read since the last sweep.
+    read: Mutex<HashSet<String>>,
+}
+
+impl Cache {
+    /// The body at `path`, from the cache when GitHub says it has not changed.
+    fn get(&self, client: &Client, path: &str) -> Result<Value> {
+        let tag = self
+            .entries
+            .lock()
+            .unwrap()
+            .get(path)
+            .map(|(t, _)| t.clone());
+        let (body, tag) = match client.get_if_changed(path, tag.as_deref()) {
+            Ok(answer) => answer,
+            // A blip keeps the last answer, so a listing that fails once does not read as an
+            // empty queue. A 4xx is no blip.
+            Err(e) if !format!("{e:#}").contains("GitHub API 4") => {
+                let kept = self
+                    .entries
+                    .lock()
+                    .unwrap()
+                    .get(path)
+                    .map(|(_, b)| b.clone());
+                let Some(body) = kept else {
+                    return Err(e);
+                };
+                eprintln!("warning: kept the last answer for {path}: {e:#}");
+                self.read.lock().unwrap().insert(path.to_string());
+                return Ok(body);
+            }
+            Err(e) => return Err(e),
+        };
+        self.read.lock().unwrap().insert(path.to_string());
+        let mut entries = self.entries.lock().unwrap();
+        match (body, tag) {
+            (Some(body), Some(tag)) => {
+                entries.insert(path.to_string(), (tag, body.clone()));
+                Ok(body)
+            }
+            (Some(body), None) => {
+                entries.remove(path);
+                Ok(body)
+            }
+            (None, _) => entries
+                .get(path)
+                .map(|(_, body)| body.clone())
+                .with_context(|| format!("GitHub answered 304 for {path}, which was never read")),
+        }
+    }
+
+    /// Forget what was not read since the last sweep, as the runs that finished.
+    fn sweep(&self) {
+        let read = std::mem::take(&mut *self.read.lock().unwrap());
+        self.entries
+            .lock()
+            .unwrap()
+            .retain(|path, _| read.contains(path));
+    }
+}
+
+/// The items in `key` of one page of a listing, or None when the listing has more pages.
+fn one_page<T: DeserializeOwned>(page: &Value, key: &str, what: &str) -> Result<Option<Vec<T>>> {
+    let items = page[key]
+        .as_array()
+        .with_context(|| format!("No {key} in the {what} listing"))?;
+    if page["total_count"]
+        .as_u64()
+        .is_some_and(|n| n > items.len() as u64)
+    {
+        return Ok(None);
+    }
+    items
+        .iter()
+        .map(|v| T::deserialize(v).with_context(|| format!("Failed to parse {what}")))
+        .collect::<Result<_>>()
+        .map(Some)
+}
+
+/// Runs of `repo` with `status`, read as one cached page, or every page when there are more.
+fn cached_runs(
+    client: &Client,
+    cache: &Cache,
+    repo: &Repo,
+    status: &str,
+) -> Result<Vec<WorkflowRun>> {
+    let path = format!("{}/actions/runs?status={status}&per_page=100", repo.api());
+    match one_page(&cache.get(client, &path)?, "workflow_runs", "workflow run")? {
+        Some(runs) => Ok(runs),
+        None => actions::runs_with_status(client, repo, status),
+    }
+}
+
+/// Jobs of a run's latest attempt, read as one cached page, or every page when there are more.
+fn cached_jobs(
+    client: &Client,
+    cache: &Cache,
+    repo: &Repo,
+    run_id: u64,
+) -> Result<Vec<actions::Job>> {
+    let path = format!(
+        "{}/actions/runs/{run_id}/jobs?filter=latest&per_page=100",
+        repo.api()
+    );
+    match one_page(&cache.get(client, &path)?, "jobs", "job")? {
+        Some(jobs) => Ok(jobs),
+        None => actions::run_jobs(client, repo, run_id),
+    }
+}
+
 /// Running and queued jobs in a repo. Queued jobs often sit inside in-progress runs, as with a
 /// matrix that outgrows its runners, so both kinds of run are scanned.
-fn active_jobs(client: &Client, repo: &Repo) -> Result<Vec<Job>> {
+fn active_jobs(client: &Client, cache: &Cache, repo: &Repo) -> Result<Vec<Job>> {
     let mut seen = HashSet::new();
     let mut jobs = Vec::new();
     for status in ["in_progress", "queued"] {
-        for run in actions::runs_with_status(client, repo, status)? {
+        for run in cached_runs(client, cache, repo, status)? {
             if !seen.insert(run.id) {
                 continue;
             }
-            for j in actions::run_jobs(client, repo, run.id)? {
+            for j in cached_jobs(client, cache, repo, run.id)? {
                 let job = job_of(j, repo, &run.name);
                 if matches!(job.status.as_str(), "in_progress" | "queued") {
                     jobs.push(job);
@@ -342,6 +462,9 @@ struct Report {
 }
 
 pub fn run(ctx: &Ctx, args: RunnersArgs) -> Result<()> {
+    if let Some(RunnersCommand::Watch(watch_args)) = args.command {
+        return watch::run(ctx, &watch_args);
+    }
     let client = &ctx.client;
     let scope = Scope::new(ctx, args.org.clone())?;
     if args.from_jobs {
@@ -362,11 +485,14 @@ pub fn run(ctx: &Ctx, args: RunnersArgs) -> Result<()> {
 
     // Scanning an organization costs a few requests per repo, so only do it when there is
     // something to find.
+    let cache = Cache::default();
     let jobs = match &scope {
-        Scope::Repo(repo) => Some(active_jobs(client, repo)?),
+        Scope::Repo(repo) => Some(active_jobs(client, &cache, repo)?),
         Scope::Org(org) if args.queued || runners.iter().any(|r| r.busy) => {
             let repos = org_repos(client, org)?;
-            Some(in_parallel(&repos, |repo| active_jobs(client, repo)))
+            Some(in_parallel(&repos, |repo| {
+                active_jobs(client, &cache, repo)
+            }))
         }
         Scope::Org(_) => None,
     };
@@ -777,6 +903,7 @@ mod tests {
 
     fn runners_args(org: Option<&str>) -> RunnersArgs {
         RunnersArgs {
+            command: None,
             org: org.map(str::to_string),
             queued: false,
             from_jobs: false,
@@ -830,7 +957,7 @@ mod tests {
         let mut server = Server::new();
         let run_1 = serve_active_runs(&mut server, "o/r");
         let client = Client::for_tests(&server.url());
-        let jobs = active_jobs(&client, &Repo::parse("o/r").unwrap()).unwrap();
+        let jobs = active_jobs(&client, &Cache::default(), &Repo::parse("o/r").unwrap()).unwrap();
         run_1.assert();
         let rows: Vec<(&str, &str, &str)> = jobs
             .iter()
@@ -844,6 +971,97 @@ mod tests {
                 ("Nightly", "Test", "queued")
             ]
         );
+    }
+
+    #[test]
+    fn the_cache_answers_a_304_with_the_body_it_kept_until_swept() {
+        let mut server = Server::new();
+        let first = server
+            .mock("GET", "/items")
+            .match_header("if-none-match", Matcher::Missing)
+            .with_header("ETag", "\"v1\"")
+            .with_body(r#"{"n": 1}"#)
+            .expect(2)
+            .create();
+        let unchanged = server
+            .mock("GET", "/items")
+            .match_header("if-none-match", "\"v1\"")
+            .with_status(304)
+            .expect(1)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let cache = Cache::default();
+        assert_eq!(cache.get(&client, "items").unwrap(), json!({"n": 1}));
+        assert_eq!(cache.get(&client, "items").unwrap(), json!({"n": 1}));
+        // Read since the last sweep, so kept, then unread through a sweep, so forgotten.
+        cache.sweep();
+        cache.sweep();
+        assert_eq!(cache.get(&client, "items").unwrap(), json!({"n": 1}));
+        first.assert();
+        unchanged.assert();
+    }
+
+    #[test]
+    fn the_cache_keeps_its_answer_through_a_blip_but_not_a_refusal() {
+        let mut server = Server::new();
+        for path in ["/blip", "/gone"] {
+            server
+                .mock("GET", path)
+                .match_header("if-none-match", Matcher::Missing)
+                .with_header("ETag", "\"v1\"")
+                .with_body(r#"{"n": 1}"#)
+                .create();
+        }
+        server
+            .mock("GET", "/blip")
+            .match_header("if-none-match", "\"v1\"")
+            .with_status(502)
+            .create();
+        server
+            .mock("GET", "/gone")
+            .match_header("if-none-match", "\"v1\"")
+            .with_status(404)
+            .with_body(r#"{"message": "Not Found"}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let cache = Cache::default();
+        for path in ["blip", "gone"] {
+            cache.get(&client, path).unwrap();
+        }
+        assert_eq!(cache.get(&client, "blip").unwrap(), json!({"n": 1}));
+        let err = cache.get(&client, "gone").unwrap_err().to_string();
+        assert_eq!(err, "GitHub API 404 on GET gone: Not Found");
+        // Nothing kept, nothing to fall back on.
+        assert!(Cache::default().get(&client, "missing").is_err());
+    }
+
+    #[test]
+    fn a_listing_longer_than_a_page_is_read_whole() {
+        let mut server = Server::new();
+        let next = format!(
+            "<{}/repos/o/r/actions/runs?status=queued&per_page=100&page=2>; rel=\"next\"",
+            server.url()
+        );
+        // Read once into the cache, where the count shows a second page, then again from the top.
+        let page_1 = server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::Exact("status=queued&per_page=100".into()))
+            .with_header("link", &next)
+            .with_body(r#"{"total_count": 2, "workflow_runs": [{"id": 1}]}"#)
+            .expect(2)
+            .create();
+        let page_2 = server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::UrlEncoded("page".into(), "2".into()))
+            .with_body(r#"{"total_count": 2, "workflow_runs": [{"id": 2}]}"#)
+            .expect(1)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        let runs = cached_runs(&client, &Cache::default(), &repo, "queued").unwrap();
+        assert_eq!(runs.iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2]);
+        page_1.assert();
+        page_2.assert();
     }
 
     #[test]

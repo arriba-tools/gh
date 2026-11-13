@@ -896,7 +896,11 @@ pub enum DismissReason {
 }
 
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct RunnersArgs {
+    #[command(subcommand)]
+    pub command: Option<RunnersCommand>,
+
     /// Runners registered to an organization instead of the repo
     #[arg(long, value_name = "ORG")]
     pub org: Option<String>,
@@ -916,6 +920,38 @@ pub struct RunnersArgs {
     /// Most recently pushed org repos to read when inferring runners from jobs
     #[arg(long, default_value_t = 10, value_name = "N")]
     pub repos: usize,
+}
+
+#[derive(Subcommand)]
+pub enum RunnersCommand {
+    /// Poll runners and the jobs waiting for them, and show a desktop notification when a runner
+    /// goes offline, sits idle while a job it could run waits, or a job waits too long, until
+    /// stopped
+    Watch(RunnersWatchArgs),
+}
+
+#[derive(Args)]
+pub struct RunnersWatchArgs {
+    /// Runners registered to an organization instead of the repo
+    #[arg(long, value_name = "ORG")]
+    pub org: Option<String>,
+
+    /// Seconds between polls, at least 30
+    #[arg(long, value_name = "SECS", default_value_t = 60, value_parser = clap::value_parser!(u64).range(30..))]
+    pub interval: u64,
+
+    /// Minutes a job may wait for a runner before it is reported
+    #[arg(long, value_name = "MINS", default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
+    pub max_wait: u64,
+
+    /// Start this watch, with these options, now and at every login (macOS and Linux), replacing
+    /// any runners watch started before
+    #[arg(long, conflicts_with = "uninstall")]
+    pub install: bool,
+
+    /// Stop the runners watch that starts at login, and stop starting it
+    #[arg(long)]
+    pub uninstall: bool,
 }
 
 #[derive(Subcommand)]

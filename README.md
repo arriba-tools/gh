@@ -168,9 +168,26 @@ it waits. GitHub lists at most 300 changed files between two commits.
 | `runners --org <ORG>` | List the organization's runners, scanning its repos for their jobs |
 | `runners --queued` | Also list jobs waiting for a runner and how long they have waited |
 | `runners --from-jobs` | Infer runners from the jobs of recent runs, without admin access |
+| `runners watch` | Poll the runners and the jobs waiting for them, and show a desktop notification when a runner goes offline or comes back, sits idle while a job it could run waits, or a job waits longer than `--max-wait` minutes |
+| `runners watch --install` | Start the watch with the options given, now and at every login, on macOS and Linux |
+| `runners watch --uninstall` | Stop the runners watch that starts at login, and stop starting it |
 
 Listing runners needs admin access: for an organization, an org admin token with the `admin:org`
-scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--from-jobs`.
+scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--from-jobs`, and
+`runners watch` reports only jobs that wait too long.
+
+`runners watch` reads the runners on every poll. It scans the scope's repos for queued jobs on
+every poll while an idle runner could run a job the last scan saw waiting, and on every fifth
+otherwise, and pauses scans while fewer than 1000 of the hour's requests are left. A runner counts
+as stalled when it is idle on two scans in a row while a queued job asks only for labels it has,
+and a job that waits too long is reported once for its set of labels, saying when no runner has
+them. Each scan reads the runs and jobs it read before with their ETags, so a listing that has not
+changed costs a 304, which GitHub does not count against the rate limit, and a listing that fails
+for a moment keeps its last answer. The first scan of an organization still costs two requests per
+repo and one per active run, and a listing longer than 100 is read whole on every scan, page by
+page, without the cache. Runner groups that keep a runner from a repo are not considered.
+`--install` registers the watch like `notify watch --install` does, logging to
+`~/Library/Logs/gh-arriba-runners-watch.log` on macOS.
 
 ### Worktrees
 
