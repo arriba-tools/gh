@@ -70,7 +70,9 @@ fn scope_runners(client: &Client, scope: &Scope) -> Result<Vec<actions::Runner>>
 /// Whether an API error means the token lacks the access the runners API needs.
 fn is_forbidden(e: &anyhow::Error) -> bool {
     let text = format!("{e:#}");
-    text.contains("GitHub API 403") || text.contains("GitHub API 404")
+    // A 403 for the rate limit says nothing about access.
+    !text.contains("rate limit")
+        && (text.contains("GitHub API 403") || text.contains("GitHub API 404"))
 }
 
 /// What to do when the runners API refuses the token.
@@ -888,6 +890,9 @@ mod tests {
         )));
         assert!(!is_forbidden(&anyhow::anyhow!(
             "GitHub API 500 on GET x: oops"
+        )));
+        assert!(!is_forbidden(&anyhow::anyhow!(
+            "GitHub API 403 on GET orgs/x/actions/runners: API rate limit exceeded for user ID 1."
         )));
         assert!(access_hint(&Scope::Org("x".to_string())).contains("admin:org"));
     }
