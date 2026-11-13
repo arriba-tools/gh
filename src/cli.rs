@@ -60,7 +60,7 @@ pub enum Command {
     /// Tidy your GitHub notifications inbox
     #[command(subcommand)]
     Inbox(InboxCommand),
-    /// Sync project config files to and from a gist
+    /// Sync project config files to and from a gist (moved to gh roam)
     Config(ConfigArgs),
 }
 

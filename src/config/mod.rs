@@ -10,7 +10,13 @@ use crate::context::Ctx;
 use crate::prompt;
 use project::ProjectConfig;
 
+/// Says where config moved, on stderr so a script reading stdout sees the same output.
+const MOVED: &str = "note: `gh arriba config` moved to `gh roam`, which takes the same commands and \
+                     gists, and will leave gh-arriba in a later release. Install it with \
+                     `gh extension install arriba-tools/gh-roam`.";
+
 pub fn run(ctx: &Ctx, args: ConfigArgs) -> Result<()> {
+    eprintln!("{MOVED}");
     let config = ProjectConfig::new(args.name, args.root, args.private)?;
     let client = GistClient::new(&ctx.client);
 
