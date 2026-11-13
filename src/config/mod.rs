@@ -38,6 +38,9 @@ pub fn run(ctx: &Ctx, args: ConfigArgs) -> Result<()> {
         Some(ConfigCommand::Sync { files }) => {
             sync::do_sync(&client, &config, &files, gist_id.as_deref())?;
         }
+        Some(ConfigCommand::Pull { files }) => {
+            sync::do_pull(&client, &config, &files, gist_id.as_deref())?;
+        }
         Some(ConfigCommand::Status { files }) => {
             sync::do_status(&client, &config, &files, gist_id.as_deref())?;
         }
@@ -188,6 +191,7 @@ mod tests {
         for command in [
             ConfigCommand::Cleanup,
             ConfigCommand::Open,
+            ConfigCommand::Pull { files: vec![] },
             ConfigCommand::Restore { files: vec![] },
             ConfigCommand::Remove {
                 files: vec!["a".into()],

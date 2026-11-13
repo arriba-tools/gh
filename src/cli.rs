@@ -1076,6 +1076,11 @@ pub enum ConfigCommand {
         /// Files to sync, relative to root
         files: Vec<String>,
     },
+    /// Pull the files the gist has newer, without pushing local changes
+    Pull {
+        /// Files to pull, relative to root (default: all tracked files)
+        files: Vec<String>,
+    },
     /// Report what sync would do without making any changes
     Status {
         /// Files to check, relative to root (default: all tracked files)

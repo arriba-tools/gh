@@ -239,6 +239,7 @@ back. Pass `-R owner/repo` to clean one repo's threads.
 | Command | Description |
 |---------|-------------|
 | `config [sync] [files]` | Push or pull each tracked file, whichever side is newer (default) |
+| `config pull [files]` | Pull each tracked file the gist has newer, without pushing anything |
 | `config status [files]` | Show what sync would push or pull, without changing anything |
 | `config add [--platform] <files>` | Track files and push them, creating the gist on first use |
 | `config remove [--platform] <files>` | Stop tracking files and delete them from the gist |
@@ -521,6 +522,8 @@ the manifest recorded for it.
 
 Edit a file on one machine at a time, since the newer copy overwrites the other. Run `config status`
 first to see what would happen, or `config restore` to take the gist version regardless.
+`config pull` takes only the pull half of sync, so a machine that only receives changes leaves the
+gist alone, and its own newer files stay as they are.
 
 ### Platform-specific files
 
